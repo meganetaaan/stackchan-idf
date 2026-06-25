@@ -4,6 +4,7 @@ set(_main_priv_reqs
     avatar
     conversation
     config_service
+    ggwave_decoder
     wifi_config_service
     jtts
     telegram
@@ -55,6 +56,9 @@ if(CONFIG_STACKCHAN_AUDIO_STREAM_ENABLED)
 endif()
 if(CONFIG_STACKCHAN_WIFI_AUDIO_ENABLED)
     list(APPEND _main_srcs "wifi_audio.cpp")
+endif()
+if(CONFIG_STACKCHAN_GGWAVE_RECEIVER_ENABLED)
+    list(APPEND _main_srcs "ggwave_receiver_task.cpp")
 endif()
 
 # quirc (QR decoder) is only needed when the camera driver is compiled in.

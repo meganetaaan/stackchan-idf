@@ -41,6 +41,9 @@
 #endif
 #include "device_ui.hpp"
 #include "diag.hpp"
+#if CONFIG_STACKCHAN_GGWAVE_RECEIVER_ENABLED
+#include "ggwave_receiver_task.hpp"
+#endif
 #include "i2c_dump.hpp"
 #include "led_task.hpp"
 #include "lt_timer.hpp"
@@ -1562,11 +1565,29 @@ extern "C" void app_main()
     ESP_LOGI(kTag, "conversation: disabled at compile time (slim build)");
 #endif
 
+    // ggwave receiver. Activates only when BOTH the conversation backend and
+    // idle JTTS are off, so Milestone 1 mic capture does not contend with the
+    // existing always-on audio owners. It yields to speaker/audio-stream
+    // activity internally.
+#if CONFIG_STACKCHAN_GGWAVE_RECEIVER_ENABLED
+    if (!cfg.openai_enabled && !cfg.jtts_idle_enabled) {
+        ESP_LOGI(kTag, "ggwave receiver: starting (conversation off, jtts idle off)");
+        stackchan::app::start_ggwave_receiver_task(*g_state);
+    } else {
+        ESP_LOGW(kTag, "ggwave receiver: not started (conv=%d jtts_idle=%d)",
+                 static_cast<int>(cfg.openai_enabled),
+                 static_cast<int>(cfg.jtts_idle_enabled));
+    }
+#endif
+
     // Mic-driven lip sync. Activates only when BOTH the conversation backend
     // AND the jtts idle babble are off — that way nothing else is driving
     // `mouth_open` and the I2S bus stays free for the mic to own. The task
     // yields to any speaker activity (balloon say / MCP say / OTA chime) and
     // re-acquires the mic afterwards. See main/mic_lip_sync_task.cpp.
+#if CONFIG_STACKCHAN_GGWAVE_RECEIVER_ENABLED
+    ESP_LOGI(kTag, "mic lip-sync: not started (ggwave receiver enabled)");
+#else
     if (!cfg.openai_enabled && !cfg.jtts_idle_enabled) {
         ESP_LOGI(kTag, "mic lip-sync: starting (conversation off, jtts idle off)");
         stackchan::app::start_mic_lip_sync_task(*g_state);
@@ -1575,6 +1596,7 @@ extern "C" void app_main()
                  static_cast<int>(cfg.openai_enabled),
                  static_cast<int>(cfg.jtts_idle_enabled));
     }
+#endif
 
     // Channel /mcp/events bring-up — deferred until after conv-task is created
     // so the conv-task's seg_buf_ alloc (3 × 8 KB internal-RAM contiguous) and

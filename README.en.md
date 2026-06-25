@@ -73,6 +73,13 @@ make monitor PORT=/dev/ttyACM0
 `M5Unified` `RTC_PowerHub_Class::setAlarmIRQ` so it stops tripping the
 GCC 14 `-Werror=maybe-uninitialized` check.
 
+## ggwave receiver milestone
+
+Milestone 1 receiver bring-up is documented in
+[docs/ggwave_milestone1.md](docs/ggwave_milestone1.md). The receiver is
+compile-time gated by `CONFIG_STACKCHAN_GGWAVE_RECEIVER_ENABLED` and defaults
+off.
+
 API keys for OpenAI / Gemini are not baked into the build; supply them at
 runtime from the BLE / Wi-Fi settings interface (stored in NVS). A compile-time
 default can be given via `sdkconfig.defaults.local` (gitignored).

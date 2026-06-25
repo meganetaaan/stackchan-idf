@@ -51,4 +51,13 @@ menu "Stack-chan feature gates"
             main/wifi_audio listener (UDP RTP/L16/μ-law/AAC). Allocates a
             multi-second PSRAM jitter ring; OFF for AtomS3.
 
+    config STACKCHAN_GGWAVE_RECEIVER_ENABLED
+        bool "Enable ggwave receiver task"
+        default n
+        help
+            Starts the Milestone 1 ggwave microphone receiver when the
+            conversation backend and idle JTTS are disabled. Defaults OFF
+            because CoreS3's mic and speaker share I2S_NUM_1 and always-on
+            capture can disrupt existing conversation / playback paths.
+
 endmenu
