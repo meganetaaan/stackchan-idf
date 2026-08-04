@@ -37,6 +37,7 @@
 #include "conversation_task.hpp"
 #endif
 #include "camera_service.hpp"
+#include "clap_dance_task.hpp"
 #include "demo_loop.hpp"
 #include "device_ui.hpp"
 #include "diag.hpp"
@@ -283,12 +284,33 @@ extern "C" void app_main()
     const bool espnow_mode = false;
 #endif
 
+    const bool clap_dance_requested =
+        (cfg.operation_mode == stackchan::config::OperationMode::ClapDance);
+    const auto* const dance_strip = board.led_strip();
+    const bool clap_dance_capable =
+        profile.has_servo_bus && cfg.servo_enabled &&
+        board.touch_sensor() != nullptr && dance_strip != nullptr &&
+        dance_strip->size() == 12;
+    const bool clap_dance_mode = clap_dance_requested && clap_dance_capable;
+    if (clap_dance_requested && !clap_dance_capable) {
+        ESP_LOGE(kTag,
+                 "clap-dance unsupported: servo_bus=%d servo_enabled=%d "
+                 "touch=%d leds=%u; falling back to MicLipSync",
+                 profile.has_servo_bus ? 1 : 0, cfg.servo_enabled ? 1 : 0,
+                 board.touch_sensor() != nullptr ? 1 : 0,
+                 dance_strip == nullptr ? 0u
+                                        : static_cast<unsigned>(dance_strip->size()));
+        cfg.operation_mode = stackchan::config::OperationMode::MicLipSync;
+    }
+
     // Resident camera init (M5Base only; no-op elsewhere / slim builds).
     // Must run after the i2c dump (which uses In_I2C) and before any task
     // that touches In_I2C starts — see camera_service::init_resident.
     // Skipped in ASR mode (frees internal/DMA RAM for esp-sr AFE).
-    if (!asr_mode) {
+    if (!asr_mode && !clap_dance_mode) {
         stackchan::app::camera_service::init_resident(board);
+    } else if (clap_dance_mode) {
+        ESP_LOGI(kTag, "camera: skipped (clap-dance mode does not use it)");
     } else {
         ESP_LOGI(kTag, "camera: skipped (ASR mode owns internal RAM)");
     }
@@ -309,13 +331,19 @@ extern "C" void app_main()
     //   ModuleAudio  → module if codec_present, else warn and use internal
     const bool codec_present = stackchan::board::es8388::probe();
     const bool effective_audio_module =
-        codec_present && (cfg.audio_output == stackchan::config::AudioOutput::Auto ||
-                          cfg.audio_output == stackchan::config::AudioOutput::ModuleAudio);
+        !clap_dance_mode && codec_present &&
+        (cfg.audio_output == stackchan::config::AudioOutput::Auto ||
+         cfg.audio_output == stackchan::config::AudioOutput::ModuleAudio);
     if (cfg.audio_output == stackchan::config::AudioOutput::ModuleAudio && !codec_present) {
         ESP_LOGW(kTag, "audio_output=ModuleAudio but ES8388 absent — falling back to internal");
     }
     if (codec_present && cfg.audio_output == stackchan::config::AudioOutput::Internal) {
         ESP_LOGI(kTag, "Module Audio (ES8388) detected but audio_output=Internal — internal speaker");
+    }
+    if (clap_dance_mode && codec_present &&
+        cfg.audio_output != stackchan::config::AudioOutput::Internal) {
+        ESP_LOGI(kTag,
+                 "clap-dance mode: forcing internal audio so G6/G7 remain on the servo bus");
     }
     if (effective_audio_module) {
         if (auto r = stackchan::board::es8388::init(); r) {
@@ -529,13 +557,18 @@ extern "C" void app_main()
         cfg.openai_enabled = false;
         cfg.jtts_idle_enabled = false;
         break;
+    case stackchan::config::OperationMode::ClapDance:
+        cfg.openai_enabled = false;
+        cfg.jtts_idle_enabled = false;
+        break;
     }
-    ESP_LOGI(kTag, "operation_mode=%u (conv=%d jtts_idle=%d asr=%d espnow=%d)",
+    ESP_LOGI(kTag, "operation_mode=%u (conv=%d jtts_idle=%d asr=%d espnow=%d dance=%d)",
              static_cast<unsigned>(cfg.operation_mode),
              static_cast<int>(cfg.openai_enabled),
              static_cast<int>(cfg.jtts_idle_enabled),
              static_cast<int>(asr_mode),
-             static_cast<int>(espnow_mode));
+             static_cast<int>(espnow_mode),
+             static_cast<int>(clap_dance_mode));
 
     // SharedState + audio_stream sink must be live BEFORE config::start
     // brings the BLE GATT service online. Otherwise a client that
@@ -817,6 +850,10 @@ extern "C" void app_main()
     } else if (kLedTaskDisabledForDebug) {
         ESP_LOGW(kTag, "led_task intentionally NOT started (kLedTaskDisabledForDebug)");
     }
+    stackchan::app::start_clap_dance_task(
+        *g_state, servo_limits,
+        !no_servo_bus && cfg.servo_enabled && dance_strip != nullptr &&
+            dance_strip->size() == 12 && !kLedTaskDisabledForDebug);
 
     // ESP-NOW リモコン受信: WiFi(固定チャネル) + esp-now を起動し、受信ポーズを
     // servo 目標角へ写像する。角度は on-wire 生値が 0.1 度想定なので /10 して度に
@@ -870,7 +907,7 @@ extern "C" void app_main()
     // (no-PSRAM) slim profile drops the whole TLS / WebSocket / assistant
     // PCM ring stack at compile time.
 #if CONFIG_STACKCHAN_CONVERSATION_ENABLED
-    if (!espnow_mode) {
+    if (!espnow_mode && !clap_dance_mode) {
         stackchan::app::start_conversation_task(*g_conversation_args);
     }
 #else
@@ -891,6 +928,8 @@ extern "C" void app_main()
     } else if (espnow_mode) {
         // ESP-NOW リモコン モード: 顔と頭部が主役。マイク lip-sync は起動しない。
         ESP_LOGI(kTag, "ESP-NOW mode: mic lip-sync skipped (remote drives the head)");
+    } else if (clap_dance_mode) {
+        ESP_LOGI(kTag, "clap-dance mode: mic lip-sync skipped");
     } else if (!cfg.openai_enabled && !cfg.jtts_idle_enabled) {
         ESP_LOGI(kTag, "mic lip-sync: starting (conversation off, jtts idle off)");
         stackchan::app::start_mic_lip_sync_task(*g_state);
@@ -1000,7 +1039,7 @@ extern "C" void app_main()
     // 諦めてロード (競合する httpd が無いので問題ない)。
     // ESP-NOW モードは httpd も TTS も使わないので、httpd 待ちもボイス ロードも
     // 飛ばして即 demo_loop へ (顔 + 頭部追従のみ)。
-    if (!espnow_mode) {
+    if (!espnow_mode && !clap_dance_mode) {
         for (int i = 0; i < 80 && !stackchan::wifi_config::http_started(); ++i) {
             vTaskDelay(pdMS_TO_TICKS(500));
         }
@@ -1037,6 +1076,7 @@ extern "C" void app_main()
         .touch_gaze_follow = profile.touch_gaze_follow,
         .conversation_enabled = cfg.openai_enabled,
         .jtts_idle_enabled = cfg.jtts_idle_enabled,
+        .clap_dance_mode = clap_dance_mode,
         .external_servo_control = espnow_mode,
         .limits = servo_limits,
     });

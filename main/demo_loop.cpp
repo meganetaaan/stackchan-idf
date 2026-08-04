@@ -22,6 +22,7 @@
 
 #include "avatar/expression.hpp"
 #include "battery.hpp"
+#include "clap_dance_task.hpp"
 #include "device_ui.hpp"
 #include "lt_timer.hpp"
 #include "screens.hpp"
@@ -48,6 +49,7 @@ constexpr const char* kTag = "stackchan";
     const bool touch_gaze_follow = args.touch_gaze_follow;
     const bool conversation_enabled = args.conversation_enabled;
     const bool jtts_idle_enabled = args.jtts_idle_enabled;
+    const bool clap_dance_mode = args.clap_dance_mode;
     const bool external_servo_control = args.external_servo_control;
     const ServoLimits& limits = args.limits;
 
@@ -484,6 +486,25 @@ constexpr const char* kTag = "stackchan";
                          static_cast<unsigned>(stroke_hit_ms[1]),
                          static_cast<unsigned>(stroke_hit_ms[2]));
                 stackchan::wifi_config::mcp_events::publish_touch_stroke(direction);
+
+                if (clap_dance_mode) {
+                    const bool queued = request_clap_dance({
+                        .source = clap_dance::StartSource::HeadTouch,
+                        .tempo_source = clap_dance::TempoSource::Preset,
+                        .preset_band = clap_dance::TempoBand::Normal,
+                    });
+                    ESP_LOGI(kTag, "clap dance: head-stroke request %s",
+                             queued ? "queued" : "rejected");
+                    stroke_hit_ms = {0, 0, 0};
+                    stroke_active_ms = 0;
+                    const std::uint32_t after_ms =
+                        static_cast<std::uint32_t>(esp_timer_get_time() / 1000);
+                    next_nadenade_ms = after_ms + kNadenadeCooldownMs;
+                    next_speech_ms = after_ms + 1500;
+                    next_pose_ms = std::max(next_pose_ms, after_ms + 4000);
+                    continue;
+                }
+
                 speech.stop();
                 const float prev_yaw = g_state->servo.target_yaw_deg.load(std::memory_order_relaxed);
                 const int prev_expr = g_state->face.expression.load(std::memory_order_relaxed);
@@ -528,7 +549,7 @@ constexpr const char* kTag = "stackchan";
 
         // Random yaw + pitch every 10–20 s. Suppressed when an external source
         // (ESP-NOW remote) owns the head.
-        if (!external_servo_control && now_ms >= next_pose_ms) {
+        if (!external_servo_control && !clap_dance_mode && now_ms >= next_pose_ms) {
             g_state->servo.target_yaw_deg.store(rand_in(kYawMinDeg, kYawMaxDeg), std::memory_order_relaxed);
             g_state->servo.target_pitch_deg.store(rand_in(kPitchMinDeg, kPitchMaxDeg), std::memory_order_relaxed);
             next_pose_ms = now_ms + rand_range_ms(kPoseMinMs, kPoseMaxMs);
@@ -536,7 +557,7 @@ constexpr const char* kTag = "stackchan";
 
         // Cycle expression every 5 s — full demo only; during a conversation
         // the model drives the expression via the set_expression tool.
-        if (allow_full_demo && now_ms >= next_expression_ms) {
+        if (allow_full_demo && !clap_dance_mode && now_ms >= next_expression_ms) {
             g_state->face.expression.store(static_cast<int>(kCycle[expression_index]), std::memory_order_relaxed);
             expression_index = (expression_index + 1) % (sizeof(kCycle) / sizeof(kCycle[0]));
             next_expression_ms = now_ms + kExpressionPeriodMs;

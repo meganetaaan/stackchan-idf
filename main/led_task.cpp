@@ -104,6 +104,22 @@ void led_task_entry(void* arg)
             vTaskDelayUntil(&last_wake, kPeriodTicks);
             continue;
         }
+        // Clap dance owns the whole strip while active. Values are published
+        // before led_active with release semantics, so one acquire load yields
+        // a coherent-enough frame without touching the user's normal LED mode.
+        if (state.dance.led_active.load(std::memory_order_acquire)) {
+            const std::uint32_t color =
+                state.dance.led_color.load(std::memory_order_relaxed);
+            const std::uint8_t bright =
+                state.dance.led_brightness.load(std::memory_order_relaxed);
+            const std::uint8_t r = static_cast<std::uint8_t>((color >> 16) & 0xFF);
+            const std::uint8_t g = static_cast<std::uint8_t>((color >> 8) & 0xFF);
+            const std::uint8_t b = static_cast<std::uint8_t>(color & 0xFF);
+            strip.fill(scale8(r, bright), scale8(g, bright), scale8(b, bright));
+            (void)strip.show();
+            vTaskDelayUntil(&last_wake, kPeriodTicks);
+            continue;
+        }
         const std::uint8_t mode = state.led.mode.load(std::memory_order_relaxed);
         const std::uint32_t color = state.led.color.load(std::memory_order_relaxed);
         const std::uint8_t base_bright = state.led.brightness.load(std::memory_order_relaxed);

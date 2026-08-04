@@ -231,6 +231,22 @@ public:
     };
     Led led;
 
+    // --- Temporary output ownership for clap dance -------------------------
+    // clap_dance_task writes these fields; servo_task and led_task read them.
+    // The ordinary servo and LED state above is never overwritten, so clearing
+    // an active flag restores exactly what the previous owner requested.
+    struct DanceOverride {
+        std::atomic<float> yaw_deg{0.0f};
+        std::atomic<float> pitch_deg{0.0f};
+        std::atomic<std::uint16_t> speed{0};
+        std::atomic<bool> servo_active{false};
+
+        std::atomic<std::uint32_t> led_color{0};
+        std::atomic<std::uint8_t> led_brightness{0};
+        std::atomic<bool> led_active{false};
+    };
+    DanceOverride dance;
+
     // --- LT timekeeper (main/lt_timer.cpp; ticked by demo_loop) ------------
     struct Lt {
         // The on-device LT tab writes command / total_s and renders active /

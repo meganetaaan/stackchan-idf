@@ -27,11 +27,12 @@ enum class Provider : std::uint8_t {
 
 // Avatar's primary "what is the robot doing right now?" mode. Replaces the
 // older pair of openai_enabled / jtts_idle_enabled toggles that gave the
-// user 4 possible combinations (only 3 of which made sense). One enum, three
-// mutually-exclusive modes:
+// user 4 possible combinations (only 3 of which made sense). One enum keeps
+// the primary behaviours mutually exclusive:
 //   MicLipSync   ‐ mic input drives the mouth; no jtts babble, no conversation
 //   JttsRandom   ‐ random jtts phrases at idle; no conversation
 //   Conversation ‐ realtime AI conversation (OpenAI / Gemini / XiaoZhi)
+//   ClapDance    ‐ head stroke starts the clap-dance interaction
 // app_main derives the legacy openai_enabled / jtts_idle_enabled gates from
 // this at boot so the rest of the code path stays unchanged.
 enum class OperationMode : std::uint8_t {
@@ -42,6 +43,7 @@ enum class OperationMode : std::uint8_t {
     EspNowRemote = 4,  // M5Stack 公式 Stack-chan 互換の ESP-NOW リモコン受信 (頭部を遠隔操作)。
                        // WiFi は固定チャネル (AP 非接続) のため httpd/会話は起動しない。
                        // CONFIG_STACKCHAN_ESPNOW_REMOTE_ENABLED の時のみ選択肢に出る。
+    ClapDance    = 5,  // 頭をなでて開始する拍手テンポのダンス。
 };
 
 // OperationMode の表示・選択に関する単一の情報源。オンデバイス設定 UI
@@ -50,7 +52,7 @@ enum class OperationMode : std::uint8_t {
 // ビルド オプション (CONFIG_STACKCHAN_ASR_ENABLED) が有効な時のみ循環に含まれる。
 const char*   operation_mode_label(OperationMode m);  // 長い日本語ラベル (設定 UI 用)
 const char*   operation_mode_short(OperationMode m);  // 短いラベル (ステータス表示用)
-std::uint8_t  operation_mode_count();                 // 選択可能なモード数 (3 or 4)
+std::uint8_t  operation_mode_count();                 // 選択可能なモード数
 OperationMode next_operation_mode(OperationMode m);   // タップ循環の次モード
 
 // Output audio routing on boards that can host an M5 Module Audio (M144)
@@ -98,7 +100,10 @@ static_assert(static_cast<int>(Provider::OpenAi) == 0 &&
               "Provider numbering is a BLE/HTTP/NVS wire contract — append only");
 static_assert(static_cast<int>(OperationMode::MicLipSync) == 0 &&
               static_cast<int>(OperationMode::JttsRandom) == 1 &&
-              static_cast<int>(OperationMode::Conversation) == 2,
+              static_cast<int>(OperationMode::Conversation) == 2 &&
+              static_cast<int>(OperationMode::AsrLocal) == 3 &&
+              static_cast<int>(OperationMode::EspNowRemote) == 4 &&
+              static_cast<int>(OperationMode::ClapDance) == 5,
               "OperationMode numbering is a BLE/HTTP/NVS wire contract — append only");
 static_assert(static_cast<int>(AudioOutput::Auto) == 0 &&
               static_cast<int>(AudioOutput::Internal) == 1 &&

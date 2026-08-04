@@ -4,6 +4,7 @@ set(_main_priv_reqs
     avatar
     conversation
     config_service
+    clap_dance
     wifi_config_service
     jtts
     telegram
@@ -39,6 +40,7 @@ set(_main_srcs
     "audio_codec.cpp"
     "battery.cpp"
     "camera_service.cpp"
+    "clap_dance_task.cpp"
     "captive_portal.cpp"
     "demo_loop.cpp"
     "device_ui.cpp"

@@ -3,6 +3,8 @@
 
 #include "servo_task.hpp"
 
+#include <algorithm>
+
 #include <driver/gpio.h>
 #include <driver/uart.h>
 #include <esp_log.h>
@@ -10,6 +12,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#include "clap_dance/clap_dance.hpp"
 #include "scs_servo/scs_bus.hpp"
 #include "scs_servo/scs_servo.hpp"
 
@@ -160,17 +163,51 @@ void servo_task_entry(void* arg)
 
         // Clamp commanded angles to the configured motion range so callers
         // (demo, conversation, future UI) all stay within the per-device limits.
-        const float yaw_deg = clamp_deg(args.state->servo.target_yaw_deg.load(std::memory_order_relaxed),
-                                        args.limits.yaw_min_deg, args.limits.yaw_max_deg);
-        const float pitch_deg = clamp_deg(args.state->servo.target_pitch_deg.load(std::memory_order_relaxed),
-                                          args.limits.pitch_min_deg, args.limits.pitch_max_deg);
+        const bool dance_active =
+            args.state->dance.servo_active.load(std::memory_order_acquire);
+        const float requested_yaw =
+            dance_active
+                ? args.state->dance.yaw_deg.load(std::memory_order_relaxed)
+                : args.state->servo.target_yaw_deg.load(std::memory_order_relaxed);
+        const float requested_pitch =
+            dance_active
+                ? args.state->dance.pitch_deg.load(std::memory_order_relaxed)
+                : args.state->servo.target_pitch_deg.load(std::memory_order_relaxed);
+        const float dance_yaw_lo = std::max(
+            static_cast<float>(args.limits.yaw_min_deg),
+            -clap_dance::kYawAmplitudeDeg);
+        const float dance_yaw_hi = std::min(
+            static_cast<float>(args.limits.yaw_max_deg),
+            +clap_dance::kYawAmplitudeDeg);
+        const bool dance_range_valid =
+            dance_yaw_lo <= dance_yaw_hi &&
+            args.limits.pitch_min_deg <= 0 && args.limits.pitch_max_deg >= 0;
+        if (dance_active && !dance_range_valid) {
+            ESP_LOGE(kTag, "unsafe dance range; clearing servo override");
+            args.state->dance.servo_active.store(false, std::memory_order_release);
+            vTaskDelayUntil(&last_wake, kPeriodTicks);
+            continue;
+        }
+        const float yaw_deg =
+            dance_active
+                ? std::clamp(requested_yaw, dance_yaw_lo, dance_yaw_hi)
+                : clamp_deg(requested_yaw, args.limits.yaw_min_deg,
+                            args.limits.yaw_max_deg);
+        const float pitch_deg =
+            dance_active
+                ? 0.0f
+                : clamp_deg(requested_pitch, args.limits.pitch_min_deg,
+                            args.limits.pitch_max_deg);
         const std::uint16_t yaw_target = scs_servo::deg_to_raw(yaw_deg, args.limits.yaw_zero);
         const std::uint16_t pitch_target = scs_servo::deg_to_raw(pitch_deg, args.limits.pitch_zero);
 
         // Non-zero servo_speed_override lets the demo task drive snappy
         // gestures (e.g. head shake on nadenade) without permanently raising
         // the default head-turn speed.
-        const std::uint16_t override = args.state->servo.speed_override.load(std::memory_order_relaxed);
+        const std::uint16_t override =
+            dance_active
+                ? args.state->dance.speed.load(std::memory_order_relaxed)
+                : args.state->servo.speed_override.load(std::memory_order_relaxed);
         const std::uint16_t speed = override != 0 ? override : kGoalSpeed;
 
         if (yaw_target != last_yaw_target || pitch_target != last_pitch_target) {
