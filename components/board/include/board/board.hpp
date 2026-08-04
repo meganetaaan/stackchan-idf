@@ -129,9 +129,9 @@ public:
     // null-check before using.
     Si12tTouch* touch_sensor() noexcept;
 
-    // NeoPixel strip on the M5 base back panel (12 × WS2812 driven by the
-    // PY32 over I2C). nullptr on the Takao base, which has no strip. Callers
-    // should null-check (animation tasks skip themselves when absent).
+    // Board LED strip. The M5 base uses the 12-pixel rear strip driven by
+    // PY32 over I2C; other LED-equipped bases use their nekomimi strip.
+    // Callers should null-check (animation tasks skip themselves when absent).
     LedStrip* led_strip() noexcept;
 
     // Brief tactile pulse on the vibration motor (StopWatch M5IOE1 PYG9).

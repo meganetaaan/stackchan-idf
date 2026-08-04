@@ -32,16 +32,15 @@ public:
          std::optional<Si12tTouch>&& touch) noexcept
         : kind_{kind}, expander_{std::move(expander)}, touch_{std::move(touch)}
     {
-        // Stack-chan ネコミミ NeoPixel (18 LEDs = 9 per ear) — present on
-        // M5/Takao/AtomNyan bases, but the data line varies: CoreS3 uses
-        // GPIO9 (free pin near the M-BUS), AtomNyan uses GPIO38 (the
-        // available pin on Atomic ECHO BASE's headers). We prefer the
-        // nekomimi strip over the M5-base PY32 ring (currently disabled —
-        // JOURNAL: "M5 base 背面 NeoPixel … 完全に無効化中"); the PY32
-        // path can come back via a separate accessor without disturbing
-        // this one. StopWatch (C152) has no nekomimi wiring at all — leave
-        // led_ as nullptr so app_main / led_task null-check naturally.
+        // The M5 Stack-chan base carries 12 rear NeoPixels behind its PY32
+        // expander. Other supported bases use the 18-pixel nekomimi chain.
+        // Both backends implement LedStrip, so led_task stays board-agnostic.
+        // StopWatch (C152) has no dedicated LED wiring.
         if (kind_ == BoardKind::StopWatch) {
+            return;
+        }
+        if (kind_ == BoardKind::M5Base && expander_) {
+            led_ = std::make_unique<Py32LedStrip>(*expander_, kM5LedCount);
             return;
         }
         const int gpio = (kind_ == BoardKind::AtomNyan)
