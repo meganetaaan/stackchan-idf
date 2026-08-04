@@ -38,6 +38,7 @@
 #endif
 #include "camera_service.hpp"
 #include "clap_dance_task.hpp"
+#include "clap_input_task.hpp"
 #include "demo_loop.hpp"
 #include "device_ui.hpp"
 #include "diag.hpp"
@@ -929,7 +930,10 @@ extern "C" void app_main()
         // ESP-NOW リモコン モード: 顔と頭部が主役。マイク lip-sync は起動しない。
         ESP_LOGI(kTag, "ESP-NOW mode: mic lip-sync skipped (remote drives the head)");
     } else if (clap_dance_mode) {
-        ESP_LOGI(kTag, "clap-dance mode: mic lip-sync skipped");
+        ESP_LOGI(kTag, "clap-dance mode: starting dedicated clap input");
+        if (!stackchan::app::start_clap_input_task()) {
+            ESP_LOGE(kTag, "clap-dance mode: input task creation failed");
+        }
     } else if (!cfg.openai_enabled && !cfg.jtts_idle_enabled) {
         ESP_LOGI(kTag, "mic lip-sync: starting (conversation off, jtts idle off)");
         stackchan::app::start_mic_lip_sync_task(*g_state);

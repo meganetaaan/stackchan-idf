@@ -16,6 +16,7 @@ set(CLAP_DANCE_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 
 add_library(clap_dance_host STATIC
     ${CLAP_DANCE_ROOT}/clap_dance.cpp
+    ${CLAP_DANCE_ROOT}/clap_detector.cpp
 )
 target_include_directories(clap_dance_host PUBLIC ${CLAP_DANCE_ROOT}/include)
 target_compile_options(clap_dance_host PRIVATE -Wall -Wextra -Werror)
@@ -26,3 +27,8 @@ add_executable(clap_dance_test_controller test_controller.cpp)
 target_link_libraries(clap_dance_test_controller PRIVATE clap_dance_host)
 target_compile_options(clap_dance_test_controller PRIVATE -Wall -Wextra -Werror)
 add_test(NAME controller COMMAND clap_dance_test_controller)
+
+add_executable(clap_dance_test_detector test_detector.cpp)
+target_link_libraries(clap_dance_test_detector PRIVATE clap_dance_host)
+target_compile_options(clap_dance_test_detector PRIVATE -Wall -Wextra -Werror)
+add_test(NAME detector COMMAND clap_dance_test_detector)

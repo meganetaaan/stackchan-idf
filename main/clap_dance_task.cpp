@@ -3,6 +3,8 @@
 
 #include "clap_dance_task.hpp"
 
+#include "clap_input_task.hpp"
+
 #include <algorithm>
 #include <cstdint>
 
@@ -19,6 +21,18 @@ namespace {
 constexpr const char* kTag = "clap-dance";
 constexpr TickType_t kTaskPeriod = pdMS_TO_TICKS(20);
 QueueHandle_t g_request_queue = nullptr;
+
+enum class CommandType : std::uint8_t {
+    Start,
+    Clap,
+    Cancel,
+};
+
+struct Command {
+    CommandType type = CommandType::Start;
+    clap_dance::Request request{};
+    std::uint32_t timestamp_ms = 0;
+};
 
 bool has_safe_motion_range(const ServoLimits& limits) noexcept
 {
@@ -61,16 +75,23 @@ void task_entry(void* arg)
     for (;;) {
         const auto now_ms =
             static_cast<std::uint32_t>(esp_timer_get_time() / 1000);
-        clap_dance::Request request;
-        while (xQueueReceive(g_request_queue, &request, 0) == pdTRUE) {
-            if (controller.start(request, now_ms)) {
-                ESP_LOGI(kTag, "start source=%u tempo=preset band=%u",
-                         static_cast<unsigned>(request.source),
-                         static_cast<unsigned>(request.preset_band));
+        Command command;
+        while (xQueueReceive(g_request_queue, &command, 0) == pdTRUE) {
+            if (command.type == CommandType::Start) {
+                if (controller.start(command.request, command.timestamp_ms)) {
+                    ESP_LOGI(kTag, "start source=%u tempo=%u band=%u",
+                             static_cast<unsigned>(command.request.source),
+                             static_cast<unsigned>(command.request.tempo_source),
+                             static_cast<unsigned>(command.request.preset_band));
+                } else {
+                    ESP_LOGW(kTag, "request rejected phase=%u tempo_source=%u",
+                             static_cast<unsigned>(controller.phase()),
+                             static_cast<unsigned>(command.request.tempo_source));
+                }
+            } else if (command.type == CommandType::Clap) {
+                (void)controller.clap(command.timestamp_ms);
             } else {
-                ESP_LOGW(kTag, "request rejected phase=%u tempo_source=%u",
-                         static_cast<unsigned>(controller.phase()),
-                         static_cast<unsigned>(request.tempo_source));
+                (void)controller.cancel(command.timestamp_ms);
             }
         }
 
@@ -78,10 +99,12 @@ void task_entry(void* arg)
         apply_output(state, controller.output());
         if (auto result = controller.take_result()) {
             ESP_LOGI(kTag,
-                     "result outcome=%u source=%u band=%u bpm=%u claps=%u beats=%u",
+                     "result outcome=%u source=%u band=%u confidence=%u "
+                     "bpm=%u claps=%u beats=%u",
                      static_cast<unsigned>(result->outcome),
                      static_cast<unsigned>(result->source),
                      static_cast<unsigned>(result->tempo_band),
+                     static_cast<unsigned>(result->confidence),
                      static_cast<unsigned>(result->bpm),
                      static_cast<unsigned>(result->clap_count),
                      static_cast<unsigned>(result->beats));
@@ -94,8 +117,39 @@ void task_entry(void* arg)
 
 bool request_clap_dance(const clap_dance::Request& request) noexcept
 {
+    if (request.tempo_source == clap_dance::TempoSource::Claps &&
+        !clap_input_ready()) {
+        ESP_LOGW(kTag, "clap-tempo request rejected: input not ready");
+        return false;
+    }
+    const Command command{
+        .type = CommandType::Start,
+        .request = request,
+        .timestamp_ms =
+            static_cast<std::uint32_t>(esp_timer_get_time() / 1000),
+    };
     return g_request_queue != nullptr &&
-           xQueueSend(g_request_queue, &request, 0) == pdTRUE;
+           xQueueSend(g_request_queue, &command, 0) == pdTRUE;
+}
+
+bool cancel_clap_dance(std::uint32_t timestamp_ms) noexcept
+{
+    const Command command{
+        .type = CommandType::Cancel,
+        .timestamp_ms = timestamp_ms,
+    };
+    return g_request_queue != nullptr &&
+           xQueueSend(g_request_queue, &command, 0) == pdTRUE;
+}
+
+bool submit_clap(std::uint32_t timestamp_ms) noexcept
+{
+    const Command command{
+        .type = CommandType::Clap,
+        .timestamp_ms = timestamp_ms,
+    };
+    return g_request_queue != nullptr &&
+           xQueueSend(g_request_queue, &command, 0) == pdTRUE;
 }
 
 void start_clap_dance_task(SharedState& state, const ServoLimits& limits,
@@ -114,7 +168,7 @@ void start_clap_dance_task(SharedState& state, const ServoLimits& limits,
                  limits.pitch_max_deg);
         return;
     }
-    g_request_queue = xQueueCreate(2, sizeof(clap_dance::Request));
+    g_request_queue = xQueueCreate(12, sizeof(Command));
     if (g_request_queue == nullptr) {
         ESP_LOGE(kTag, "request queue allocation failed");
         return;

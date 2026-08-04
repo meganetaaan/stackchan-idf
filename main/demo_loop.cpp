@@ -490,7 +490,7 @@ constexpr const char* kTag = "stackchan";
                 if (clap_dance_mode) {
                     const bool queued = request_clap_dance({
                         .source = clap_dance::StartSource::HeadTouch,
-                        .tempo_source = clap_dance::TempoSource::Preset,
+                        .tempo_source = clap_dance::TempoSource::Claps,
                         .preset_band = clap_dance::TempoBand::Normal,
                     });
                     ESP_LOGI(kTag, "clap dance: head-stroke request %s",

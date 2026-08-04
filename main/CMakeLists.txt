@@ -41,6 +41,7 @@ set(_main_srcs
     "battery.cpp"
     "camera_service.cpp"
     "clap_dance_task.cpp"
+    "clap_input_task.cpp"
     "captive_portal.cpp"
     "demo_loop.cpp"
     "device_ui.cpp"

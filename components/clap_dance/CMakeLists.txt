@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "clap_dance.cpp"
+    SRCS "clap_dance.cpp" "clap_detector.cpp"
     INCLUDE_DIRS "include"
 )
 target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_20)

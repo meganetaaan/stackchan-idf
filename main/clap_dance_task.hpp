@@ -15,5 +15,7 @@ namespace stackchan::app {
 void start_clap_dance_task(SharedState& state, const ServoLimits& limits,
                            bool outputs_available);
 bool request_clap_dance(const clap_dance::Request& request) noexcept;
+bool submit_clap(std::uint32_t timestamp_ms) noexcept;
+bool cancel_clap_dance(std::uint32_t timestamp_ms) noexcept;
 
 } // namespace stackchan::app
