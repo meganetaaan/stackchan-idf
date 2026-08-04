@@ -1,0 +1,4 @@
+interface:
+  display_name: "Review Stack-chan Motion"
+  short_description: "Stack-chanの動作変更を安全制約と状態復元の観点でレビュー"
+  default_prompt: "$review-stackchan-motionを使って、現在の動作変更を安全性中心にレビューしてください。"
