@@ -48,12 +48,16 @@ public:
                              ? NekomimiLedStrip::kDataGpioAtomNyan
                              : NekomimiLedStrip::kDataGpioCoreS3;
         led_ = std::make_unique<NekomimiLedStrip>(gpio);
+        if (kind_ == BoardKind::M5Base && expander_) {
+            back_led_ = std::make_unique<Py32LedStrip>(*expander_, kM5LedCount);
+        }
     }
 
     BoardKind kind() const noexcept { return kind_; }
     std::optional<Py32Expander>& expander() noexcept { return expander_; }
     Si12tTouch* touch() noexcept { return touch_ ? &*touch_ : nullptr; }
     LedStrip* led() noexcept { return led_.get(); }
+    LedStrip* back_led() noexcept { return back_led_.get(); }
 
 private:
     BoardKind kind_;
@@ -63,6 +67,7 @@ private:
     // NekomimiLedStrip have different sizes / move semantics. nullptr on
     // hardware without any strip (AtomNyan).
     std::unique_ptr<LedStrip> led_;
+    std::unique_ptr<LedStrip> back_led_;
 };
 
 tl::expected<Board, Error> Board::begin()
@@ -303,6 +308,11 @@ Si12tTouch* Board::touch_sensor() noexcept
 LedStrip* Board::led_strip() noexcept
 {
     return impl_->led();
+}
+
+LedStrip* Board::back_led_strip() noexcept
+{
+    return impl_->back_led();
 }
 
 bool Board::vibrate(std::uint32_t duration_ms)

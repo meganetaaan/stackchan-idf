@@ -1,0 +1,2 @@
+# Development-only override. Append after sdkconfig.defaults.article03.
+CONFIG_STACKCHAN_ARTICLE03_DANCE_DIRECT_AT_BOOT=y

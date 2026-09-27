@@ -3,6 +3,7 @@ set(_main_priv_reqs
     crash_report
     scs_servo
     avatar
+    dance
     conversation
     config_service
     wifi_config_service
@@ -36,6 +37,7 @@ set(_main_priv_reqs
 set(_main_srcs
     "ap_screen.cpp"
     "app_main.cpp"
+    "article03_dance.cpp"
     "asr_probe.cpp"
     "atom_status.cpp"
     "audio_codec.cpp"

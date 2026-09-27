@@ -91,3 +91,27 @@ config STACKCHAN_SANO_BENCH
         ログに出す。技術検証用 (cores3-sano)。通常のビルドでは n。
 
 endmenu
+
+menu "CodeZine Article 03 dance"
+
+    config STACKCHAN_ARTICLE03_DANCE_ENABLED
+        bool "Enable the isolated Article 03 clap-dance mode"
+        default n
+        depends on !STACKCHAN_CONVERSATION_ENABLED
+        depends on !STACKCHAN_AUDIO_STREAM_ENABLED
+        depends on !STACKCHAN_WIFI_AUDIO_ENABLED
+        help
+            Replaces the normal demo loop with the time-bounded clap-dance
+            harness used for CodeZine Article 03 development. The dance core
+            remains independent and can be called by other adapters later.
+
+    config STACKCHAN_ARTICLE03_DANCE_DIRECT_AT_BOOT
+        bool "Run one dance directly after boot instead of listening for claps"
+        default n
+        depends on STACKCHAN_ARTICLE03_DANCE_ENABLED
+        help
+            Development-only entry point. Waits 10 seconds after the firmware
+            reaches ready, then runs one 90 BPM, 3 second dance without using
+            the clap detector. Reboot to run it again.
+
+endmenu

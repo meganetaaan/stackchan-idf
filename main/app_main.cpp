@@ -23,6 +23,7 @@
 #include <esp_ota_ops.h>
 #include <esp_heap_caps.h>
 
+#include "article03_dance.hpp"
 #if CONFIG_STACKCHAN_AUDIO_STREAM_ENABLED
 #include "audio_stream_sink.hpp"
 #endif
@@ -917,6 +918,21 @@ extern "C" void app_main()
         stackchan::app::diag_heap("pre-servo");
         stackchan::app::start_servo_task(*g_servo_args);
     }
+    // Article 03 directly drives the built-in back-panel strip only while a
+    // bounded dance is active. Other modes keep the existing long-running
+    // cat-ear animation task driven by SharedState.
+#if CONFIG_STACKCHAN_ARTICLE03_DANCE_ENABLED
+    stackchan::board::LedStrip* article03_led_strip = board.back_led_strip();
+    if (article03_led_strip == nullptr) {
+        ESP_LOGE(kTag, "Article 03 requires the PY32 back-panel LED strip");
+    } else if (auto r = article03_led_strip->begin(); !r) {
+        ESP_LOGE(kTag, "Article 03 back-panel LED init failed: %d",
+                 static_cast<int>(r.error()));
+        article03_led_strip = nullptr;
+    } else {
+        ESP_LOGI(kTag, "Article 03 back-panel LED strip ready");
+    }
+#else
     // NeoPixel animation task. Driven by SharedState (led_mode / led_color /
     // led_brightness). Only spun up when the board actually has a strip
     // (CoreS3 = GPIO9, AtomNyan = GPIO38; both surface a NekomimiLedStrip).
@@ -927,6 +943,7 @@ extern "C" void app_main()
     } else if (kLedTaskDisabledForDebug) {
         ESP_LOGW(kTag, "led_task intentionally NOT started (kLedTaskDisabledForDebug)");
     }
+#endif
 
     // ESP-NOW リモコン受信: WiFi(固定チャネル) + esp-now を起動し、受信ポーズを
     // servo 目標角へ写像する。角度は on-wire 生値が 0.1 度想定なので /10 して度に
@@ -1028,6 +1045,9 @@ extern "C" void app_main()
     // `mouth_open` and the I2S bus stays free for the mic to own. The task
     // yields to any speaker activity (balloon say / MCP say / OTA chime) and
     // re-acquires the mic afterwards. See main/mic_lip_sync_task.cpp.
+#if CONFIG_STACKCHAN_ARTICLE03_DANCE_ENABLED
+    ESP_LOGI(kTag, "mic lip-sync: not started (Article 03 dance owns the mic)");
+#else
     if (asr_mode) {
         // ローカル音声 (ASR) モード: マイクは ASR (WakeNet) が占有するので lip-sync は
         // 起動しない。AFE の生成 (asr_probe_run) は httpd 起動後まで遅延する — AFE が
@@ -1045,6 +1065,7 @@ extern "C" void app_main()
                  static_cast<int>(cfg.openai_enabled),
                  static_cast<int>(cfg.jtts_idle_enabled));
     }
+#endif
 
     // Channel /mcp/events bring-up — deferred until after conv-task is created
     // so the conv-task's seg_buf_ alloc (3 × 8 KB internal-RAM contiguous) and
@@ -1147,6 +1168,19 @@ extern "C" void app_main()
         "qr_boot", 3072, &board, tskIDLE_PRIORITY + 1, nullptr, 0);
 #endif
 
+#if CONFIG_STACKCHAN_ARTICLE03_DANCE_ENABLED
+    if (board.kind() != stackchan::board::BoardKind::M5Base) {
+        ESP_LOGE(kTag, "Article 03 dance requires the CoreS3 M5 base; task not started");
+    } else if (article03_led_strip == nullptr) {
+        ESP_LOGE(kTag, "Article 03 dance not started because the back-panel LED is unavailable");
+    } else if (!stackchan::app::article03::start(*g_state, *article03_led_strip)) {
+        ESP_LOGE(kTag, "Article 03 dance task failed to start");
+    }
+    for (;;) {
+        M5.update();
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+#else
     // HMM ボイス / 音声 DB のロードをここまで遅延させる。HMM ボイスの
     // mmap+パースは内部 RAM を大きく消費・断片化させるので、これを httpd_start
     // より先にやると httpd タスク (12 KiB 内部スタック) の確保が
@@ -1219,4 +1253,5 @@ extern "C" void app_main()
         .external_servo_control = espnow_mode,
         .limits = servo_limits,
     });
+#endif
 }
