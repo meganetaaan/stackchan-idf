@@ -102,7 +102,10 @@ menu "CodeZine Article 03 dance"
         depends on !STACKCHAN_WIFI_AUDIO_ENABLED
         help
             Replaces the normal demo loop with the time-bounded clap-dance
-            harness used for CodeZine Article 03 development. The dance core
+            harness used for CodeZine Article 03 development. The clap entry
+            starts in standby. A top-sensor head stroke and hand release
+            toggles dance mode while idle. In dance mode claps start repeated
+            dances; head strokes during motion/cooldown are ignored. The dance core
             remains independent and can be called by other adapters later.
 
     config STACKCHAN_ARTICLE03_DANCE_DIRECT_AT_BOOT

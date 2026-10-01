@@ -1173,11 +1173,18 @@ extern "C" void app_main()
         ESP_LOGE(kTag, "Article 03 dance requires the CoreS3 M5 base; task not started");
     } else if (article03_led_strip == nullptr) {
         ESP_LOGE(kTag, "Article 03 dance not started because the back-panel LED is unavailable");
-    } else if (!stackchan::app::article03::start(*g_state, *article03_led_strip)) {
+    } else if (!stackchan::app::article03::start(*g_state, *article03_led_strip, head_touch)) {
         ESP_LOGE(kTag, "Article 03 dance task failed to start");
     }
     for (;;) {
+        if (g_state->i2c_quiesce.load(std::memory_order_acquire)) {
+            stackchan::app::article03::poll_head_touch(nullptr, 0);
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
         M5.update();
+        stackchan::app::article03::poll_head_touch(
+            head_touch, static_cast<std::uint32_t>(esp_timer_get_time() / 1'000));
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 #else

@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
 
 #include <esp_log.h>
@@ -18,8 +19,10 @@
 
 #include "avatar/expression.hpp"
 #include "board/led_strip.hpp"
+#include "board/si12t_touch.hpp"
 #include "dance/clap_tempo_estimator.hpp"
 #include "dance/dance.hpp"
+#include "dance/dance_mode_input.hpp"
 
 namespace stackchan::app::article03 {
 
@@ -32,6 +35,10 @@ constexpr TickType_t kI2sSettleTicks = pdMS_TO_TICKS(20);
 constexpr std::uint32_t kDirectStartDelayMs = 10'000;
 constexpr std::uint32_t kPostDanceCooldownMs = 1'000;
 constexpr std::uint32_t kClapFeedbackMs = 220;
+
+using InputState = dance::DanceModeInput::State;
+dance::DanceModeInput mode_input;
+std::mutex input_mutex;
 
 std::uint8_t scale_channel(std::uint8_t value, std::uint8_t brightness) noexcept
 {
@@ -199,9 +206,10 @@ private:
 
 struct Context {
     Context(SharedState& state, stackchan::board::LedStrip& strip)
-        : runtime{state, strip}, controller{runtime}
+        : state{state}, runtime{state, strip}, controller{runtime}
     {}
 
+    SharedState& state;
     SharedStateRuntime runtime;
     dance::DanceController controller;
 };
@@ -255,12 +263,63 @@ void run_clap_listener(Context& context)
     bool feedback_on = false;
     std::uint32_t feedback_off_at_ms = 0;
 
-    ESP_LOGI(kTag, "clap mode ready; waiting for %u claps",
-             static_cast<unsigned>(dance::ClapTempoEstimator::kRequiredClaps));
+    // Mode changes are acknowledged only after microphone/feedback cleanup.
+    // Pending transitions cannot be toggled again before the worker sees them.
+    context.state.set_balloon_text("頭をなでてね", 3'000);
+    ESP_LOGI(kTag, "standby; head stroke enters dance mode; mic=off");
+    {
+        std::lock_guard lock{input_mutex};
+        mode_input.enable();
+    }
+    std::uint32_t input_revision = 0;
 
     for (;;) {
         const std::uint32_t loop_now_ms =
             static_cast<std::uint32_t>(esp_timer_get_time() / 1'000);
+        InputState input_state;
+        bool claps_allowed;
+        bool input_changed;
+        {
+            std::lock_guard lock{input_mutex};
+            input_state = mode_input.state();
+            claps_allowed = mode_input.claps_allowed(context.runtime.now_ms());
+            input_changed = input_revision != mode_input.revision();
+            input_revision = mode_input.revision();
+        }
+        if (!claps_allowed || input_changed) {
+            if (mic_owned) {
+                M5.Mic.end();
+                mic_owned = false;
+                vTaskDelay(kI2sSettleTicks);
+            }
+            estimator.reset();
+            const bool leaving = input_state == InputState::Leaving;
+            if (feedback_on || leaving) {
+                if (!context.runtime.clear_clap_feedback()) {
+                    std::lock_guard lock{input_mutex};
+                    mode_input.disable();
+                    ESP_LOGE(kTag, "input disabled: failed to clear feedback");
+                }
+                feedback_on = false;
+            }
+            if (input_state == InputState::Entering || leaving) {
+                InputState settled;
+                {
+                    std::lock_guard lock{input_mutex};
+                    mode_input.settle_transition();
+                    settled = mode_input.state();
+                }
+                if (settled == InputState::Listening) {
+                    context.state.set_balloon_text("手拍子を4回", 3'000);
+                    ESP_LOGI(kTag, "dance mode; waiting for claps; head stroke exits");
+                } else if (settled == InputState::Standby) {
+                    context.state.set_balloon_text("待機中", 3'000);
+                    ESP_LOGI(kTag, "standby; clap count reset; mic=off");
+                }
+            }
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
         if (feedback_on &&
             static_cast<std::int32_t>(loop_now_ms - feedback_off_at_ms) >= 0) {
             (void)context.runtime.clear_clap_feedback();
@@ -283,7 +342,12 @@ void run_clap_listener(Context& context)
             vTaskDelay(kI2sSettleTicks);
             if (!M5.Mic.begin()) {
                 ESP_LOGW(kTag, "M5.Mic.begin failed; retrying in 5 s");
-                vTaskDelay(pdMS_TO_TICKS(5'000));
+                for (int i = 0; i < 100; ++i) {
+                    vTaskDelay(pdMS_TO_TICKS(50));
+                    std::lock_guard lock{input_mutex};
+                    if (mode_input.state() != InputState::Listening ||
+                        input_revision != mode_input.revision()) break;
+                }
                 continue;
             }
             mic_owned = true;
@@ -299,6 +363,18 @@ void run_clap_listener(Context& context)
             vTaskDelay(pdMS_TO_TICKS(2));
         }
 
+        // Discard audio captured across a head contact or mode transition.
+        {
+            std::lock_guard lock{input_mutex};
+            if (!mode_input.claps_allowed(context.runtime.now_ms()) ||
+                input_revision != mode_input.revision()) continue;
+        }
+        if (M5.Mic.isRecording()) {
+            M5.Mic.end();
+            mic_owned = false;
+            estimator.reset();
+            continue;
+        }
         const float rms = rms_amplitude(samples);
         const std::uint32_t now_ms = static_cast<std::uint32_t>(esp_timer_get_time() / 1'000);
         const dance::ClapObservation observation = estimator.observe(rms, now_ms);
@@ -316,6 +392,15 @@ void run_clap_listener(Context& context)
             continue;
         }
 
+        {
+            // Atomically claim the dance against a pending exit or contact.
+            // Sampling is under the same lock, so no in-flight read can
+            // deliver an old gesture after the dance starts.
+            std::lock_guard lock{input_mutex};
+            if (input_revision != mode_input.revision() ||
+                !mode_input.start_dance(context.runtime.now_ms())) continue;
+        }
+
         ESP_LOGI(kTag, "clap tempo detected requested_bpm=%u claps=%u",
                  static_cast<unsigned>(*observation.tempo_bpm),
                  static_cast<unsigned>(dance::ClapTempoEstimator::kRequiredClaps));
@@ -324,9 +409,18 @@ void run_clap_listener(Context& context)
         feedback_on = false;
         vTaskDelay(kI2sSettleTicks);
 
-        (void)run_and_log(context, {*observation.tempo_bpm, dance::kClapDurationMs});
+        const auto result = run_and_log(context, {*observation.tempo_bpm, dance::kClapDurationMs});
         vTaskDelay(pdMS_TO_TICKS(kPostDanceCooldownMs));
         estimator.reset();
+        {
+            std::lock_guard lock{input_mutex};
+            if (result.outcome == dance::DanceOutcome::Completed) mode_input.finish_dance();
+            else mode_input.disable();
+        }
+        if (result.outcome != dance::DanceOutcome::Completed) {
+            ESP_LOGE(kTag, "input disabled after unsuccessful dance");
+            continue;
+        }
         ESP_LOGI(kTag, "clap mode ready; waiting for %u claps",
                  static_cast<unsigned>(dance::ClapTempoEstimator::kRequiredClaps));
     }
@@ -347,6 +441,10 @@ void task_entry(void* arg)
     };
     if (!context->runtime.apply(initial_safe_frame)) {
         ESP_LOGE(kTag, "failed to command initial safe state");
+        // Never arm a new input while the initial output state is unknown.
+        context.reset(); // vTaskDelete does not unwind C++ stack objects.
+        vTaskDelete(nullptr);
+        return;
     } else {
         ESP_LOGI(kTag, "initial safe state commanded");
     }
@@ -359,8 +457,17 @@ void task_entry(void* arg)
 
 } // namespace
 
-bool start(SharedState& state, stackchan::board::LedStrip& strip)
+bool start(SharedState& state, stackchan::board::LedStrip& strip,
+           stackchan::board::Si12tTouch* head_touch)
 {
+#if !CONFIG_STACKCHAN_ARTICLE03_DANCE_DIRECT_AT_BOOT
+    if (head_touch == nullptr) {
+        ESP_LOGE(kTag, "head sensor unavailable; clap-dance task not started");
+        return false;
+    }
+#else
+    (void)head_touch; // development runner intentionally bypasses both inputs
+#endif
     auto context = std::make_unique<Context>(state, strip);
     const BaseType_t rc = xTaskCreatePinnedToCore(
         task_entry, "article03-dance", 6'144, context.get(), tskIDLE_PRIORITY + 3, nullptr, 1);
@@ -370,6 +477,31 @@ bool start(SharedState& state, stackchan::board::LedStrip& strip)
     }
     (void)context.release();
     return true;
+}
+
+void poll_head_touch(stackchan::board::Si12tTouch* touch, std::uint32_t now_ms)
+{
+    // I2C still runs on app_main. Serialize sampling with the worker's dance
+    // claim; no sensor reads are accepted during dance or cooldown.
+    static bool read_failed = false;
+    std::lock_guard lock{input_mutex};
+    if (!mode_input.reads_head()) return;
+    if (touch == nullptr) {
+        mode_input.observe(std::nullopt, now_ms);
+        return;
+    }
+    const auto reading = touch->read_checked();
+    if (!reading) {
+        mode_input.observe(std::nullopt, now_ms);
+        if (!read_failed) ESP_LOGW(kTag, "head sensor read failed; gesture discarded");
+        read_failed = true;
+        return;
+    }
+    read_failed = false;
+    mode_input.observe(reading->intensities, now_ms);
+    if (mode_input.state() == InputState::Entering || mode_input.state() == InputState::Leaving) {
+        ESP_LOGI(kTag, "head stroke accepted after release; mode switch requested");
+    }
 }
 
 } // namespace stackchan::app::article03

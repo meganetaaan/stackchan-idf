@@ -65,6 +65,10 @@ public:
     // intensities. Returns an all-zero Reading on bus error.
     Reading read();
 
+    // Unlike read(), preserves bus errors so a caller gating motion does not
+    // mistake a failed read for a released hand.
+    tl::expected<Reading, Error> read_checked();
+
     // Force the chip to update its idle baseline for all channels. Call
     // after a disturbance that's likely to skew the running baseline (e.g.
     // servo VM rail switched on, Wi-Fi associated). Without this the chip

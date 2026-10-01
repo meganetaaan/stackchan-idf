@@ -113,10 +113,15 @@ void Si12tTouch::recalibrate()
 
 Si12tTouch::Reading Si12tTouch::read()
 {
+    return read_checked().value_or(Reading{});
+}
+
+tl::expected<Si12tTouch::Reading, Error> Si12tTouch::read_checked()
+{
     Reading r{};
     std::uint8_t raw = 0;
     if (!m5::In_I2C.readRegister(address_, kRegOutput1, &raw, 1, kI2cFreq)) {
-        return r;
+        return tl::unexpected{Error::TouchRead};
     }
     // OUTPUT1 layout: bits[1:0] = back, bits[3:2] = middle, bits[5:4] = front
     // (BSP maps point_type[0]=bits0-1 then reverses to _intensities[2-i]).
