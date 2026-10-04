@@ -178,6 +178,31 @@ public:
         return true;
     }
 
+    bool show_input_status(bool listening) noexcept
+    {
+        const std::uint32_t color = listening ? 0x00FFFF : 0xFF8000;
+        const std::uint8_t brightness = listening ? 32 : 24;
+        strip_.clear();
+        for (std::size_t index = 0; index < strip_.size(); ++index) {
+            strip_.set(index,
+                       scale_channel((color >> 16) & 0xFFu, brightness),
+                       scale_channel((color >> 8) & 0xFFu, brightness),
+                       scale_channel(color & 0xFFu, brightness));
+        }
+        if (auto result = strip_.show(); !result) {
+            ESP_LOGE(kTag, "input status LED update failed: %d",
+                     static_cast<int>(result.error()));
+            return false;
+        }
+        state_.led.mode.store(1, std::memory_order_relaxed);
+        state_.led.color.store(color, std::memory_order_relaxed);
+        state_.led.brightness.store(brightness, std::memory_order_relaxed);
+        last_led_frame_.reset();
+        ESP_LOGI(kTag, "input status LED: %s",
+                 listening ? "cyan; mic ready" : "orange; standby");
+        return true;
+    }
+
     bool clear_clap_feedback() noexcept
     {
         strip_.clear();
@@ -261,6 +286,7 @@ void run_clap_listener(Context& context)
     std::array<std::int16_t, kChunkSamples> samples{};
     bool mic_owned = false;
     bool feedback_on = false;
+    bool ready_on = false;
     std::uint32_t feedback_off_at_ms = 0;
 
     // Mode changes are acknowledged only after microphone/feedback cleanup.
@@ -270,6 +296,10 @@ void run_clap_listener(Context& context)
     {
         std::lock_guard lock{input_mutex};
         mode_input.enable();
+    }
+    if (!context.runtime.show_input_status(false)) {
+        std::lock_guard lock{input_mutex};
+        mode_input.disable();
     }
     std::uint32_t input_revision = 0;
 
@@ -294,13 +324,14 @@ void run_clap_listener(Context& context)
             }
             estimator.reset();
             const bool leaving = input_state == InputState::Leaving;
-            if (feedback_on || leaving) {
+            if (feedback_on || ready_on || leaving) {
                 if (!context.runtime.clear_clap_feedback()) {
                     std::lock_guard lock{input_mutex};
                     mode_input.disable();
                     ESP_LOGE(kTag, "input disabled: failed to clear feedback");
                 }
                 feedback_on = false;
+                ready_on = false;
             }
             if (input_state == InputState::Entering || leaving) {
                 InputState settled;
@@ -310,10 +341,14 @@ void run_clap_listener(Context& context)
                     settled = mode_input.state();
                 }
                 if (settled == InputState::Listening) {
-                    context.state.set_balloon_text("手拍子を4回", 3'000);
+                    context.state.set_balloon_text("手拍子を4回", 8'000);
                     ESP_LOGI(kTag, "dance mode; waiting for claps; head stroke exits");
                 } else if (settled == InputState::Standby) {
-                    context.state.set_balloon_text("待機中", 3'000);
+                    if (!context.runtime.show_input_status(false)) {
+                        std::lock_guard lock{input_mutex};
+                        mode_input.disable();
+                    }
+                    context.state.set_balloon_text("待機中", 8'000);
                     ESP_LOGI(kTag, "standby; clap count reset; mic=off");
                 }
             }
@@ -354,6 +389,15 @@ void run_clap_listener(Context& context)
             estimator.reset();
         }
 
+        if (!feedback_on && !ready_on) {
+            if (!context.runtime.show_input_status(true)) {
+                std::lock_guard lock{input_mutex};
+                mode_input.disable();
+                continue;
+            }
+            ready_on = true;
+        }
+
         if (!M5.Mic.record(samples.data(), samples.size(), kSampleRate, /*stereo=*/false)) {
             ESP_LOGW(kTag, "M5.Mic.record failed; retrying");
             vTaskDelay(pdMS_TO_TICKS(20));
@@ -385,6 +429,7 @@ void run_clap_listener(Context& context)
                      static_cast<unsigned>(now_ms));
             if (context.runtime.show_clap_feedback(observation.clap_count)) {
                 feedback_on = true;
+                ready_on = false;
                 feedback_off_at_ms = now_ms + kClapFeedbackMs;
             }
         }
@@ -407,6 +452,7 @@ void run_clap_listener(Context& context)
         M5.Mic.end();
         mic_owned = false;
         feedback_on = false;
+        ready_on = false;
         vTaskDelay(kI2sSettleTicks);
 
         const auto result = run_and_log(context, {*observation.tempo_bpm, dance::kClapDurationMs});
