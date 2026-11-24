@@ -153,6 +153,8 @@ public:
     Dance dance;
 
     // --- Conversation backend (conversation_task writes) -------------------
+    bool conversation_dance_enabled{false};
+    std::atomic<bool> dance_session_active{false};
     struct Conversation {
         // True while a conversation session is live.
         std::atomic<bool> active{false};

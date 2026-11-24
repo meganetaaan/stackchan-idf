@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSL-1.0
 
 #include "demo_loop.hpp"
+#include "article03_dance.hpp"
 
 #include <algorithm>
 #include <array>
@@ -157,6 +158,8 @@ constexpr const char* kTag = "stackchan";
     constexpr std::uint32_t kShakeCooldownMs = 800;
     std::uint32_t next_shake_ms = 0;
 
+    auto load_voice = args.deferred_voice_load;
+    const auto started_ms = static_cast<std::uint32_t>(esp_timer_get_time() / 1000);
     for (;;) {
         // Camera session in progress: every In_I2C touch (M5.update's
         // touch/BtnPWR poll, INA226 battery, Si12T nadenade, BMI270 shake)
@@ -172,6 +175,12 @@ constexpr const char* kTag = "stackchan";
         M5.update();
 
         const std::uint32_t now_ms = static_cast<std::uint32_t>(esp_timer_get_time() / 1000);
+
+        if (load_voice && !g_state->dance_session_active.load() &&
+            (wifi_config::http_started() || now_ms - started_ms >= 40000)) {
+            load_voice(false);
+            load_voice = nullptr;
+        }
 
         // Live-apply speaker_volume_pct changes from the device-UI (BLE /
         // HTTP sinks already apply directly). Cheap atomic compare per
@@ -252,7 +261,7 @@ constexpr const char* kTag = "stackchan";
             lt_cfg_seen = v;
             lt_timer.configure(g_state->snapshot_lt_config(), g_state);
         }
-        lt_timer.tick(*g_state, speech, now_ms);
+        if (!g_state->conversation_dance_enabled) lt_timer.tick(*g_state, speech, now_ms);
 
         // Battery: sample the INA226 every few seconds and fan the result out to
         // the device UI (SharedState) + the BLE / Wi-Fi settings services.
@@ -294,7 +303,7 @@ constexpr const char* kTag = "stackchan";
                 // for the whole turn, so the screen tap is how the user
                 // interrupts. The conversation task consumes this during
                 // playback.
-                if (!consumed &&
+                if (!consumed && !g_state->dance_session_active.load() &&
                     g_state->barge_in_enabled.load(std::memory_order_relaxed) &&
                     g_state->conv.active.load(std::memory_order_relaxed) &&
                     !g_state->conv.idle.load(std::memory_order_relaxed)) {
@@ -341,6 +350,13 @@ constexpr const char* kTag = "stackchan";
             }
         }
 
+#if CONFIG_STACKCHAN_CONVERSATION_DANCE
+        if (g_state->conversation_dance_enabled) {
+            article03::poll_head_touch(app::screens::overlay_active() ? nullptr : g_touch, now_ms);
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+#endif
         const bool conv_active = g_state->conv.active.load(std::memory_order_relaxed);
         const bool conv_idle = g_state->conv.idle.load(std::memory_order_relaxed);
         const bool audio_streaming = g_state->audio_stream_active.load(std::memory_order_relaxed);

@@ -35,5 +35,6 @@ add_test(NAME head_stroke_detector COMMAND test_head_stroke)
 
 add_executable(test_dance_mode test_dance_mode.cpp)
 target_link_libraries(test_dance_mode PRIVATE dance)
+target_include_directories(test_dance_mode PRIVATE ${DANCE_ROOT}/../conversation/include)
 target_compile_options(test_dance_mode PRIVATE -Wall -Wextra -Werror)
 add_test(NAME dance_mode_input COMMAND test_dance_mode)

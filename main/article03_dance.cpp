@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: BSL-1.0
 
 #include "article03_dance.hpp"
+#include "dance/session.hpp"
+#include "settings_sinks.hpp"
 
 #include <algorithm>
 #include <array>
@@ -39,6 +41,9 @@ constexpr std::uint32_t kClapFeedbackMs = 220;
 using InputState = dance::DanceModeInput::State;
 dance::DanceModeInput mode_input;
 std::mutex input_mutex;
+#if CONFIG_STACKCHAN_CONVERSATION_DANCE
+board::LedStrip* session_strip = nullptr;
+#endif
 
 std::uint8_t scale_channel(std::uint8_t value, std::uint8_t brightness) noexcept
 {
@@ -57,8 +62,15 @@ public:
         return static_cast<std::uint32_t>(esp_timer_get_time() / 1'000);
     }
 
+#if CONFIG_STACKCHAN_CONVERSATION_DANCE
+    std::function<void()> service_frame;
+#endif
+
     void sleep_ms(std::uint32_t duration_ms) noexcept override
     {
+#if CONFIG_STACKCHAN_CONVERSATION_DANCE
+        if (service_frame) service_frame();
+#endif
         if (duration_ms == 0) return;
         vTaskDelay(pdMS_TO_TICKS(duration_ms));
     }
@@ -79,7 +91,9 @@ public:
         // Article 03 owns the strip while its isolated demo mode is active.
         // Disable mouth modulation so the configured low brightness remains
         // deterministic even when NVS previously enabled lip-sync.
+#if !CONFIG_STACKCHAN_CONVERSATION_DANCE
         state_.led.mouth_sync_enabled.store(false, std::memory_order_relaxed);
+#endif
         state_.led.color.store(frame.led_color, std::memory_order_relaxed);
         state_.led.brightness.store(frame.led_brightness, std::memory_order_relaxed);
         const bool led_on = frame.led_side != dance::LedSide::Off;
@@ -124,7 +138,11 @@ public:
         }
 
         if (frame.tone_frequency_hz != 0) {
+#if CONFIG_STACKCHAN_CONVERSATION_DANCE
+            settings_sinks::refresh_speaker_volume();
+#else
             M5.Speaker.setVolume(dance::kToneVolume);
+#endif
             if (!M5.Speaker.tone(frame.tone_frequency_hz, dance::kToneDurationMs)) {
                 ESP_LOGE(kTag, "dance tone start failed: frequency_hz=%u",
                          static_cast<unsigned>(frame.tone_frequency_hz));
@@ -140,7 +158,11 @@ public:
                      static_cast<unsigned>(dance::kToneVolume));
         } else if (!frame.happy) {
             M5.Speaker.stop();
+#if CONFIG_STACKCHAN_CONVERSATION_DANCE
+            settings_sinks::refresh_speaker_volume();
+#else
             M5.Speaker.setVolume(previous_speaker_volume_);
+#endif
         }
         return true;
     }
@@ -502,6 +524,163 @@ void task_entry(void* arg)
 }
 
 } // namespace
+
+#if CONFIG_STACKCHAN_CONVERSATION_DANCE
+void configure_sessions(SharedState& state, board::LedStrip& strip)
+{
+    std::lock_guard lock{input_mutex};
+    SharedStateRuntime runtime{state, strip};
+    if (!runtime.show_input_status(false)) return;
+    session_strip = &strip;
+    mode_input.enable_session_mode();
+}
+
+bool request_session()
+{
+    std::lock_guard lock{input_mutex};
+    return mode_input.request_session();
+}
+
+bool session_requested()
+{
+    std::lock_guard lock{input_mutex};
+    return mode_input.state() == InputState::Entering;
+}
+
+std::string run_session(SharedState& state, const std::function<bool()>& service_connection)
+{
+    Context context{state, *session_strip};
+    auto& runtime = context.runtime;
+    dance::Session session{runtime.now_ms()};
+    auto reason = dance::SessionExit::Error;
+    {
+        std::lock_guard lock{input_mutex};
+        mode_input.settle_transition();
+    }
+    M5.Mic.end();
+    M5.Speaker.stop();
+    M5.Speaker.end();
+    state.face.mouth_open.store(0);
+    state.servo.masked.store(false);
+    dance::ClapTempoEstimator estimator;
+    // 3本目を登録できた時点で、M5Unifiedの2段録音キューから最古のバッファが外れている
+    // Mic.end()後もドライバに未処理の録音先が残るため、次回のMic.begin()まで寿命を保つ
+    static std::array<std::array<std::int16_t, kChunkSamples>, 3> samples{};
+    std::size_t write_slot = 0;
+    unsigned primed = 0;
+    std::uint32_t revision = 0;
+    bool mic = false;
+    bool show_ready = true;
+    std::uint32_t feedback_at = 0;
+    bool running = true;
+    runtime.service_frame = [&] {
+        if (!service_connection()) {
+            reason = dance::SessionExit::Error;
+            running = false;
+        } else {
+            std::lock_guard lock{input_mutex};
+            if (mode_input.state() == InputState::Leaving) {
+                reason = dance::SessionExit::HeadStroke;
+                running = false;
+            }
+        }
+        if (!running) context.controller.request_stop();
+    };
+    while (running) {
+        runtime.service_frame();
+        if (!running) break;
+        auto now = runtime.now_ms();
+        if (session.expired(now)) {
+            reason = dance::SessionExit::Timeout;
+            break;
+        }
+        if (!mic) {
+            M5.Speaker.end();
+            vTaskDelay(kI2sSettleTicks);
+            if (!M5.Mic.begin()) {
+                ESP_LOGE(kTag, "session microphone start failed");
+                break;
+            }
+            mic = true;
+            primed = 0;
+            state.set_balloon_text("手拍子を4回", 0);
+        }
+        if (show_ready || (feedback_at && now - feedback_at >= kClapFeedbackMs)) {
+            if (!runtime.show_input_status(true)) break;
+            show_ready = false;
+            feedback_at = 0;
+        }
+        for (int i = 0; i < 100 && M5.Mic.isRecording() == 2; ++i) vTaskDelay(1);
+        if (M5.Mic.isRecording() == 2) {
+            ESP_LOGE(kTag, "session microphone queue stalled");
+            break;
+        }
+        auto& next = samples[write_slot];
+        if (!M5.Mic.record(next.data(), next.size(), kSampleRate, false)) {
+            ESP_LOGE(kTag, "session microphone record failed");
+            break;
+        }
+        write_slot = (write_slot + 1) % samples.size();
+        if (primed < 2) {
+            ++primed;
+            continue;
+        }
+        now = runtime.now_ms();
+        {
+            std::lock_guard lock{input_mutex};
+            if (revision != mode_input.revision() || !mode_input.claps_allowed(now)) {
+                revision = mode_input.revision();
+                estimator.reset();
+                continue;
+            }
+        }
+        const auto clap = estimator.observe(rms_amplitude(samples[write_slot]), now);
+        if (!clap.clap_detected) continue;
+        session.last_activity_ms = now;
+        if (!runtime.show_clap_feedback(clap.clap_count)) break;
+        feedback_at = now;
+        if (!clap.tempo_bpm) continue;
+        {
+            std::lock_guard lock{input_mutex};
+            if (revision != mode_input.revision() || !mode_input.start_dance(now)) continue;
+        }
+        M5.Mic.end();
+        mic = false;
+        vTaskDelay(kI2sSettleTicks);
+        state.set_balloon_text("おどるよ！", 0);
+        const auto result = run_and_log(context, {*clap.tempo_bpm, dance::kClapDurationMs});
+        if (result.outcome != dance::DanceOutcome::Completed) {
+            if (result.outcome != dance::DanceOutcome::Interrupted) reason = dance::SessionExit::Error;
+            break;
+        }
+        session.completed(result.actual_tempo_bpm);
+        for (unsigned ms = 0; running && ms < kPostDanceCooldownMs; ms += 20) runtime.sleep_ms(20);
+        estimator.reset();
+        show_ready = true;
+        feedback_at = 0;
+        std::lock_guard lock{input_mutex};
+        mode_input.finish_dance();
+    }
+    M5.Mic.end();
+    M5.Speaker.stop();
+    M5.Speaker.end();
+    state.servo.target_yaw_deg.store(0);
+    state.servo.target_pitch_deg.store(0);
+    state.servo.speed_override.store(0);
+    state.servo.dance_active.store(false);
+    settings_sinks::refresh_speaker_volume();
+    if (!runtime.show_input_status(false)) reason = dance::SessionExit::Error;
+    state.set_balloon_text("待機中", 1200);
+    {
+        std::lock_guard lock{input_mutex};
+        mode_input.enable();
+    }
+    auto summary = session.summary(reason);
+    ESP_LOGI(kTag, "dance session finished: reason=%s count=%u", dance::to_string(reason),
+             static_cast<unsigned>(session.tempos_bpm.size()));
+    return summary;
+}
+#endif
 
 bool start(SharedState& state, stackchan::board::LedStrip& strip,
            stackchan::board::Si12tTouch* head_touch)

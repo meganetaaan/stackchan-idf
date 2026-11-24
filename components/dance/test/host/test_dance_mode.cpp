@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: BSL-1.0
 #include "dance/dance_mode_input.hpp"
+#include "conversation/reply_watchdog.hpp"
+#include "dance/session.hpp"
 #include <cstdio>
 #include <limits>
 
@@ -102,10 +104,61 @@ void test_boundary_and_wrap()
     f.stroke();
     expect(f.input.state() == State::Leaving, "fresh stroke after dance can exit");
 }
+void test_conversation_session()
+{
+    using namespace stackchan::dance;
+    Fixture f;
+    f.input.enable_session_mode();
+    expect(f.input.request_session(), "tool enters standby session");
+    expect(!f.input.request_session(), "duplicate tool cannot restart timer");
+    f.input.settle_transition(); f.quiet();
+    expect(f.input.start_dance(f.now), "released head permits choreography");
+    f.quiet(); f.stroke();
+    expect(f.input.state() == State::Leaving, "stroke interrupts integrated choreography");
+    f.input.finish_dance();
+    expect(f.input.state() == State::Leaving, "cleanup preserves exit request");
+    f.input.enable(); f.quiet(); f.stroke();
+    expect(f.input.state() == State::Entering, "manual session works after cleanup");
+
+    expect(valid_session_arguments(" \t{ \n}"), "empty JSON object accepted");
+    for (auto invalid : {"", "[]", "{", "{ }x", "{\"tempo\":60}"}) {
+        expect(!valid_session_arguments(invalid), "reject malformed or extra arguments");
+    }
+    Session session{UINT32_MAX - 8000};
+    expect(!session.expired(session.last_activity_ms + 19999), "wait across wrap");
+    expect(session.expired(session.last_activity_ms + 20000), "timeout at twenty seconds");
+    expect(session.summary(SessionExit::Timeout) ==
+           R"({"ok":true,"dance_count":0,"tempos_bpm":[],"exit_reason":"timeout"})", "empty timeout summary");
+    session.last_activity_ms = 1000;
+    session.completed(60);
+    session.last_activity_ms = 30000;
+    session.completed(200);
+    expect(!session.expired(49999), "accepted clap renews window");
+    expect(session.summary(SessionExit::HeadStroke) ==
+           R"({"ok":true,"dance_count":2,"tempos_bpm":[60,200],"exit_reason":"head_stroke"})", "all completed tempos in order");
+    expect(session.summary(SessionExit::Error) ==
+           R"({"ok":false,"dance_count":2,"tempos_bpm":[60,200],"exit_reason":"error"})", "failed run preserves completions");
+    stackchan::conversation::ReplyWatchdog watchdog;
+    watchdog.restart(UINT32_MAX - 1000);
+    expect(!watchdog.expired(13998), "follow-up has a full fifteen seconds across wrap");
+    expect(watchdog.expired(13999), "stalled follow-up reaches deadline");
+    watchdog.restart(100000);
+    expect(!watchdog.expired(100000), "return from long dance starts fresh watchdog");
+    expect(session_return(false, false, false) == SessionReturn::Standby, "offline head stroke returns to standby");
+    expect(session_return(true, false, false) == SessionReturn::Reconnect, "manual disconnect reconnects");
+    expect(!needs_busy_reply("dance1", "dance1"), "duplicate call ID waits for original summary");
+    expect(needs_busy_reply("dance1", "call2"), "new call during tool dance gets busy");
+    expect(needs_busy_reply("", "call2"), "new call during manual dance gets busy");
+    expect(session_return(false, true, false) == SessionReturn::Standby, "connect arriving during offline dance waits");
+    expect(session_return(true, true, false) == SessionReturn::Listening, "manual online resumes microphone");
+    expect(session_return(true, true, true) == SessionReturn::ToolResult, "tool call returns its summary");
+    expect(session_return(true, false, true) == SessionReturn::Reconnect, "disconnect discards old tool id");
+}
 } // namespace
 int main()
 {
     test_mode_cycle(); test_contact_errors_and_stale_data(); test_boundary_and_wrap();
+    test_conversation_session();
     if (failures) return 1;
     std::puts("all dance mode input checks passed");
     return 0;

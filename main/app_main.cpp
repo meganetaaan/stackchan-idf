@@ -98,6 +98,29 @@ stackchan::app::ConversationTaskArgs* g_conversation_args = nullptr;
 #endif
 stackchan::app::LedTaskArgs* g_led_args = nullptr;
 
+void load_voice_assets(bool asr_mode)
+{
+    // ASR モードでは重い HMM / unit ボイスをロードしない — その内部/DMA RAM を
+    // AFE + マイク I2S DMA に回すため。ウェイクワードの返事「はい」は軽い formant
+    // TTS で十分。他モードは従来どおり全ボイスを使う。
+    if (!asr_mode) {
+        if (const auto units = stackchan::app::voice_db::init(); units > 0) {
+            ESP_LOGI(kTag, "jvox: voice DB active (%u units) — unit-concat TTS enabled", units);
+        }
+    } else {
+        // ASR モードでは重い unit ボイス DB は積まないが、HMM ボイスは返事の音質の
+        // ため載せる (16kHz モデルなら高速)。RAM に載るか実測で確認。
+        ESP_LOGI(kTag, "ASR mode: unit voice DB skipped");
+    }
+    stackchan::app::diag_heap("pre-hmm_voice(http up)");
+    if (stackchan::app::hmm_voice::init()) {
+        ESP_LOGI(kTag, "hts: HMM voice active — HMM TTS enabled");
+    }
+    if (stackchan::app::sano_weights::init()) {
+        ESP_LOGI(kTag, "sanoTTS: weights active — neural TTS enabled");
+    }
+}
+
 // LT timekeeper snapshot for HTTP GET /api/lt/status. Plain atomics read —
 // safe from the httpd task; the timer itself stays owned by demo_loop.
 stackchan::config::LtStateView lt_state_view()
@@ -630,6 +653,9 @@ extern "C" void app_main()
     // the entire audio session is silently dropped — every subsequent
     // audio_data write sees g_audio_sink == nullptr and bails.
     g_state = new stackchan::app::SharedState{};
+#if CONFIG_STACKCHAN_CONVERSATION_DANCE
+    g_state->conversation_dance_enabled = cfg.openai_enabled;
+#endif
     stackchan::app::settings_sinks::attach_state(*g_state);
     // Seed the speaker volume atom from NVS. apply_speaker_volume was
     // already called before g_state existed (the boot arpeggio block,
@@ -921,7 +947,7 @@ extern "C" void app_main()
     // Article 03 directly drives the built-in back-panel strip only while a
     // bounded dance is active. Other modes keep the existing long-running
     // cat-ear animation task driven by SharedState.
-#if CONFIG_STACKCHAN_ARTICLE03_DANCE_ENABLED
+#if CONFIG_STACKCHAN_ARTICLE03_DANCE_ENABLED || CONFIG_STACKCHAN_CONVERSATION_DANCE
     stackchan::board::LedStrip* article03_led_strip = board.back_led_strip();
     if (article03_led_strip == nullptr) {
         ESP_LOGE(kTag, "Article 03 requires the PY32 back-panel LED strip");
@@ -931,6 +957,10 @@ extern "C" void app_main()
         article03_led_strip = nullptr;
     } else {
         ESP_LOGI(kTag, "Article 03 back-panel LED strip ready");
+#if CONFIG_STACKCHAN_CONVERSATION_DANCE
+        if (g_state->conversation_dance_enabled && head_touch) stackchan::app::article03::configure_sessions(*g_state, *article03_led_strip);
+        g_conversation_args->touch = nullptr;
+#endif
     }
 #else
     // NeoPixel animation task. Driven by SharedState (led_mode / led_color /
@@ -1034,7 +1064,16 @@ extern "C" void app_main()
     // PCM ring stack at compile time.
 #if CONFIG_STACKCHAN_CONVERSATION_ENABLED
     if (!espnow_any) {
+#if CONFIG_STACKCHAN_CONVERSATION_DANCE
+        if (g_state->conversation_dance_enabled) {
+            play_boot_sounds();
+            M5.Speaker.end();
+            vTaskDelay(pdMS_TO_TICKS(20));
+            stackchan::app::start_conversation_task(*g_conversation_args);
+        }
+#else
         stackchan::app::start_conversation_task(*g_conversation_args);
+#endif
     }
 #else
     ESP_LOGI(kTag, "conversation: disabled at compile time (slim build)");
@@ -1148,7 +1187,7 @@ extern "C" void app_main()
     }
 
     // 起動音はここ (起動確認の後 = 各サブシステム初期化完了後) で鳴らす。
-    play_boot_sounds();
+    if (!g_state->conversation_dance_enabled) play_boot_sounds();
 
 #if CONFIG_STACKCHAN_QR_TEST_AT_BOOT
     // Phase 1+2 bring-up trigger: spawn a one-shot waiter that defers the
@@ -1201,29 +1240,11 @@ extern "C" void app_main()
     // 諦めてロード (競合する httpd が無いので問題ない)。
     // ESP-NOW モードは httpd も TTS も使わないので、httpd 待ちもボイス ロードも
     // 飛ばして即 demo_loop へ (顔 + 頭部追従のみ)。
-    if (!espnow_any) {
+    if (!espnow_any && !g_state->conversation_dance_enabled) {
         for (int i = 0; i < 80 && !stackchan::wifi_config::http_started(); ++i) {
             vTaskDelay(pdMS_TO_TICKS(500));
         }
-        // ASR モードでは重い HMM / unit ボイスをロードしない — その内部/DMA RAM を
-        // AFE + マイク I2S DMA に回すため。ウェイクワードの返事「はい」は軽い formant
-        // TTS で十分。他モードは従来どおり全ボイスを使う。
-        if (!asr_mode) {
-            if (const auto units = stackchan::app::voice_db::init(); units > 0) {
-                ESP_LOGI(kTag, "jvox: voice DB active (%u units) — unit-concat TTS enabled", units);
-            }
-        } else {
-            // ASR モードでは重い unit ボイス DB は積まないが、HMM ボイスは返事の音質の
-            // ため載せる (16kHz モデルなら高速)。RAM に載るか実測で確認。
-            ESP_LOGI(kTag, "ASR mode: unit voice DB skipped");
-        }
-        stackchan::app::diag_heap("pre-hmm_voice(http up)");
-        if (stackchan::app::hmm_voice::init()) {
-            ESP_LOGI(kTag, "hts: HMM voice active — HMM TTS enabled");
-        }
-        if (stackchan::app::sano_weights::init()) {
-            ESP_LOGI(kTag, "sanoTTS: weights active — neural TTS enabled");
-        }
+        load_voice_assets(asr_mode);
     }
 
     // ASR モードの AFE 生成は httpd (+ HMM ボイス) の後まで遅延 — httpd が先に
@@ -1235,7 +1256,7 @@ extern "C" void app_main()
     // ダンス エンジン: 音声同期でサーボを駆動する。マイク/スピーカーを占有する
     // ASR や、頭部を外部制御する ESP-NOW とは排他 (通常モードのみ)。トリガは
     // HTTP /api/dance/start|stop (BLE/画面は P4)。
-    if (!asr_mode && !espnow_any) {
+    if (!g_state->conversation_dance_enabled && !asr_mode && !espnow_any) {
         stackchan::app::diag_heap("pre-dance");
         stackchan::app::start_dance_engine(*g_state, servo_limits);
         stackchan::wifi_config::set_dance_control_sink(&stackchan::app::dance_control);
@@ -1259,6 +1280,7 @@ extern "C" void app_main()
         .jtts_idle_enabled = cfg.jtts_idle_enabled,
         .external_servo_control = espnow_mode,
         .limits = servo_limits,
+        .deferred_voice_load = g_state->conversation_dance_enabled ? &load_voice_assets : nullptr,
     });
 #endif
 }

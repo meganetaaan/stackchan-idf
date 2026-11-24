@@ -33,6 +33,7 @@ struct DemoLoopArgs {
     // still runs). See OperationMode::EspNowRemote.
     bool external_servo_control = false;
     ServoLimits limits;                        // random-pose ranges
+    void (*deferred_voice_load)(bool asr_mode) = nullptr;
 };
 
 [[noreturn]] void run_demo_loop(const DemoLoopArgs& args);

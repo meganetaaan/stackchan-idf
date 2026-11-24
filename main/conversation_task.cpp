@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: BSL-1.0
 
 #include "conversation_task.hpp"
+#include "article03_dance.hpp"
+#include "dance/session.hpp"
 
 #include <algorithm>
 #include <array>
@@ -25,8 +27,10 @@
 #include "board/si12t_touch.hpp"
 #include "conversation/gemini_live_client.hpp"
 #include "conversation/metrics.hpp"
+#include "conversation/reply_watchdog.hpp"
 #include "conversation/openai_realtime_client.hpp"
 #include "conversation/xiaozhi_client.hpp"
+#include "settings_sinks.hpp"
 #include "utf8.hpp"
 #include "wifi_sta.hpp"
 
@@ -68,9 +72,6 @@ constexpr std::uint32_t kJitterBufferMs = 300;
 
 // Mic / speaker I2S handoff settle time (matches the existing audio code).
 constexpr TickType_t kI2sSettle = pdMS_TO_TICKS(20);
-
-// Recover from a stuck "Thinking" (no audio, no tool follow-up) after this long.
-constexpr std::uint32_t kThinkingTimeoutMs = 15000;
 
 // Recover from a stuck "Speaking" (assistant playback drained but the
 // generationComplete / interrupted / turnComplete event never arrived,
@@ -230,6 +231,9 @@ public:
                                                                      : api_key_.empty();
         if (disabled) {
             ESP_LOGW(kTag, "credentials empty for selected provider — conversation disabled");
+#if CONFIG_STACKCHAN_CONVERSATION_DANCE
+            for (;;) offline_tick();
+#endif
             vTaskDelete(nullptr);
             return;
         }
@@ -237,11 +241,24 @@ public:
         ESP_LOGI(kTag, "waiting for Wi-Fi...");
         state_.conv.status.store(ConvStatus::WaitingWifi, std::memory_order_relaxed);
         while (!wifi_is_connected()) {
+#if CONFIG_STACKCHAN_CONVERSATION_DANCE
+            offline_tick();
+#else
             vTaskDelay(pdMS_TO_TICKS(500));
+#endif
         }
         ESP_LOGI(kTag, "Wi-Fi up, starting %s conversation", provider_name());
 
         event_queue_ = xQueueCreate(32, sizeof(conv::ConversationEvent*));
+        if (event_queue_ == nullptr) {
+            state_.conv.status.store(ConvStatus::Error);
+            ESP_LOGE(kTag, "conversation event queue allocation failed");
+#if CONFIG_STACKCHAN_CONVERSATION_DANCE
+            for (;;) offline_tick();
+#endif
+            vTaskDelete(nullptr);
+            return;
+        }
         mic_buf_[0].resize(mic_chunk_samples_);
         mic_buf_[1].resize(mic_chunk_samples_);
 
@@ -257,6 +274,9 @@ public:
                          "seg_buf not provided by app_main — conversation disabled "
                          "(boot-time internal-RAM reservation failed)");
                 state_.conv.status.store(ConvStatus::Error, std::memory_order_relaxed);
+#if CONFIG_STACKCHAN_CONVERSATION_DANCE
+                for (;;) offline_tick();
+#endif
                 vTaskDelete(nullptr);
                 return;
             }
@@ -271,14 +291,31 @@ public:
         }
         client_->set_event_callback([this](const conv::ConversationEvent& ev) { enqueue_event(ev); });
 
+#if CONFIG_STACKCHAN_CONVERSATION_DANCE
+        connect_when_ready();
+#else
         if (!connect()) {
             ESP_LOGE(kTag, "initial connect failed; conversation disabled");
             state_.conv.status.store(ConvStatus::Error, std::memory_order_relaxed);
             vTaskDelete(nullptr);
             return;
         }
-
+#endif
         for (;;) {
+#if CONFIG_STACKCHAN_CONVERSATION_DANCE
+            if (local_ == Local::Listening && settings_sinks::play_requested_speech()) enter_listening();
+            if (article03::session_requested()) {
+                if (local_ == Local::Listening || local_ == Local::Thinking || local_ == Local::Speaking) {
+                    if (local_ != Local::Listening) (void)client_->cancel_response();
+                    dance_session(nullptr);
+                } else if (local_ == Local::Init) {
+                    client_->stop();
+                    flush_events();
+                    offline_tick();
+                    connect_when_ready();
+                }
+            }
+#endif
             // Full conversation shutdown for BLE audio streaming. Yielding
             // just the mic isn't enough — the live WebSocket + mbedtls
             // session keeps Wi-Fi pumping and squeezes internal RAM,
@@ -318,19 +355,103 @@ public:
                 // session-ready event; outer loop will drain_events()
                 // and the existing handler progresses us to Listening.
             }
+            if (queue_fault_.exchange(false)) {
+                recover_after_error();
+                continue;
+            }
             drain_events();
             service_state();
         }
     }
 
 private:
+#if CONFIG_STACKCHAN_CONVERSATION_DANCE
+    void connect_when_ready()
+    {
+        for (;;) {
+            while (!wifi_is_connected()) offline_tick();
+            if (connect()) return;
+            client_->stop();
+            for (int tick = 0; tick < 100; ++tick) offline_tick();
+            flush_events();
+        }
+    }
+
+    void offline_tick()
+    {
+        if (article03::session_requested()) {
+            dance_session(nullptr, false);
+        } else {
+            settings_sinks::play_requested_speech();
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+
+    void dance_session(const conv::ToolCall* call, bool online = true)
+    {
+        bool connected = true;
+        bool response_done = false;
+        const std::string_view call_id = call ? std::string_view{call->call_id} : std::string_view{};
+        state_.dance_session_active.store(true);
+        state_.conv.idle.store(false);
+        const auto result = article03::run_session(state_, [&] {
+            if (!online) return true;
+            conv::ConversationEvent* ev = nullptr;
+            while (xQueueReceive(event_queue_, &ev, 0) == pdTRUE) {
+                using Type = conv::ConversationEventType;
+                if (ev->type == Type::GoingAway ||
+                    (ev->type == Type::Error && (ev->error == conv::ConversationError::NotConnected ||
+                                                 ev->error == conv::ConversationError::TransportInit))) connected = false;
+                if (ev->type == Type::ResponseDone) response_done = true;
+                if (ev->type == Type::ToolCallRequested && ev->tool_call && connected &&
+                    dance::needs_busy_reply(call_id, ev->tool_call->call_id)) {
+                    connected = client_->submit_tool_result(
+                        *ev->tool_call, R"({"ok":false,"error":"dance busy"})", false).has_value();
+                }
+                delete ev;
+            }
+            connected = connected && !queue_fault_.exchange(false) && wifi_is_connected() && client_->state() != conv::ConversationState::Error;
+            return connected;
+        });
+        state_.dance_session_active.store(false);
+        state_.barge_in_request.store(false);
+        assistant_pcm_.clear();
+        assistant_text_.clear();
+        pending_chunks_.clear();
+        audio_complete_ = false;
+        switch (dance::session_return(online, connected && wifi_is_connected(), call != nullptr)) {
+        case dance::SessionReturn::Standby:
+            break;
+        case dance::SessionReturn::Reconnect:
+            recover_after_error();
+            break;
+        case dance::SessionReturn::ToolResult:
+            tool_pending_ = !response_done;
+            set_local(Local::Thinking);
+            reply_watchdog_.restart(now_ms());
+            if (!client_->submit_tool_result(*call, result)) recover_after_error();
+            break;
+        case dance::SessionReturn::Listening:
+            if (client_->state() == conv::ConversationState::Listening) enter_listening();
+            else recover_after_error(false);
+            break;
+        }
+    }
+#endif
     // ---- event bridge: WS task -> this task --------------------------------
 
     void enqueue_event(const conv::ConversationEvent& ev)
     {
-        auto* copy = new conv::ConversationEvent(ev);
+        using Type = conv::ConversationEventType;
+        const bool media = ev.type == Type::AssistantAudioChunk || ev.type == Type::AssistantTextDelta;
+        if (media && state_.dance_session_active.load()) return;
+        auto* copy = new (std::nothrow) conv::ConversationEvent(ev);
+        if (!copy) {
+            queue_fault_.store(true);
+            return;
+        }
         if (xQueueSend(event_queue_, &copy, 0) != pdTRUE) {
-            ESP_LOGW(kTag, "event queue full, dropping %d", static_cast<int>(ev.type));
+            if (!media) queue_fault_.store(true);
             delete copy;
         }
     }
@@ -356,6 +477,7 @@ private:
             delete ev;
             ++dropped;
         }
+        queue_fault_.store(false);
         if (dropped > 0) {
             ESP_LOGD(kTag, "flushed %u stale events", static_cast<unsigned>(dropped));
         }
@@ -388,6 +510,12 @@ private:
         // drives the avatar's expression via its `llm` emotion messages, which
         // the client maps to AssistantEmotion events.
         if (provider_ != config::Provider::XiaoZhi) {
+#if CONFIG_STACKCHAN_CONVERSATION_DANCE
+            if (system_prompt_.empty()) cfg.instructions += "小学生にもわかる言葉で短く話してね。";
+            cfg.instructions += "ダンスに誘われたら start_dance_mode を呼び、結果からひとこと感想を話してね。";
+            cfg.tools.push_back({.name = "start_dance_mode", .description = "手拍子ダンスに誘われたら開始する。終了後のtempos_bpmは完走した順のテンポ履歴。",
+                                 .parameters_json = R"({"type":"object","properties":{}})"});
+#endif
             cfg.tools.push_back(make_set_expression_tool());
             cfg.tools.push_back(make_set_head_pose_tool());
             cfg.tools.push_back(make_speak_katakoto_tool());
@@ -408,6 +536,14 @@ private:
     // reconnect flow (teardown old client + dma settle + connect).
     void recover_after_error(bool from_failure = true)
     {
+#if CONFIG_STACKCHAN_CONVERSATION_DANCE
+        state_.conv.active.store(false);
+        M5.Mic.end();
+        M5.Speaker.end();
+        state_.servo.masked.store(false);
+        client_->stop();
+        flush_events();
+#endif
         if (from_failure) {
             ++consecutive_recover_failures_;
             // Cap at 60 s. 500 ms × 2^(n-1) for n=1..7 then capped (n>=8 → 60s):
@@ -424,7 +560,11 @@ private:
                 // Skip the wait on the first try so transient blips don't
                 // visibly delay reconnect; back off only when failures
                 // pile up.
+#if CONFIG_STACKCHAN_CONVERSATION_DANCE
+                for (unsigned elapsed = 0; elapsed < backoff_ms; elapsed += 50) offline_tick();
+#else
                 vTaskDelay(pdMS_TO_TICKS(backoff_ms));
+#endif
             }
         } else {
             ESP_LOGI(kTag, "graceful session handoff (goAway)");
@@ -436,7 +576,9 @@ private:
             vTaskDelay(kI2sSettle);
         }
         state_.face.mouth_open.store(0.0f, std::memory_order_relaxed);
+#if !CONFIG_STACKCHAN_CONVERSATION_DANCE
         client_->stop();
+#endif
         // The shutdown fires WEBSOCKET_EVENT_DISCONNECTED (and sometimes a
         // trailing ERROR) which the trampoline turns into transport-error
         // events. We sit out the WS task's teardown, then flush the queue —
@@ -459,7 +601,7 @@ private:
         // pool was actually starved — so the gate "passed" and the AES
         // alloc still failed, looping forever.
         constexpr std::size_t kMinDmaLargestB = 16 * 1024;
-        constexpr std::uint32_t kBackoffStepMs = 500;
+        [[maybe_unused]] constexpr std::uint32_t kBackoffStepMs = 500;
         constexpr int kMaxBackoffSteps = 20; // 10 s cap
         for (int i = 0; i < kMaxBackoffSteps; ++i) {
             // Bail immediately if a BLE audio stream wants the stage —
@@ -470,7 +612,11 @@ private:
                 ESP_LOGI(kTag, "recover aborted — BLE audio active");
                 return;
             }
+#if CONFIG_STACKCHAN_CONVERSATION_DANCE
+            for (int tick = 0; tick < 10; ++tick) offline_tick();
+#else
             vTaskDelay(pdMS_TO_TICKS(kBackoffStepMs));
+#endif
             const std::size_t dma_largest = heap_caps_get_largest_free_block(MALLOC_CAP_DMA);
             if (i == 0 || (i % 4) == 3) {
                 ESP_LOGI(kTag,
@@ -486,6 +632,10 @@ private:
         assistant_pcm_.clear();
         assistant_text_.clear();
         if (state_.audio_stream_active.load(std::memory_order_acquire)) return;
+#if CONFIG_STACKCHAN_CONVERSATION_DANCE
+        tool_pending_ = false;
+        connect_when_ready();
+#else
         if (!connect()) {
             ESP_LOGE(kTag, "reconnect failed; retrying in 5 s");
             state_.conv.status.store(ConvStatus::Error, std::memory_order_relaxed);
@@ -493,6 +643,7 @@ private:
             flush_events();
             connect();
         }
+#endif
     }
 
     // ---- per-state servicing ----------------------------------------------
@@ -530,9 +681,10 @@ private:
             service_mic();
             break;
         case Local::Thinking:
-            if (now_ms() - thinking_since_ms_ > kThinkingTimeoutMs) {
-                ESP_LOGW(kTag, "thinking timed out, returning to listening");
-                enter_listening();
+            if (reply_watchdog_.expired(now_ms())) {
+                ESP_LOGW(kTag, "thinking timed out");
+                if (client_->state() == conv::ConversationState::Listening) enter_listening();
+                else recover_after_error();
             } else {
                 vTaskDelay(pdMS_TO_TICKS(10));
             }
@@ -660,6 +812,7 @@ private:
         // Drop any barge-in tap that arrived during the just-finished turn so it
         // can't immediately re-trigger now that we're listening again.
         state_.barge_in_request.store(false, std::memory_order_relaxed);
+        tool_pending_ = false;
         // Prime the 2-deep mic queue.
         M5.Mic.record(mic_buf_[0].data(), mic_buf_[0].size(), mic_sample_rate_, /*stereo=*/false);
         M5.Mic.record(mic_buf_[1].data(), mic_buf_[1].size(), mic_sample_rate_, /*stereo=*/false);
@@ -832,12 +985,11 @@ private:
             ESP_LOGI(kTag, "user speech stopped");
             if (local_ == Local::Listening) {
                 set_local(Local::Thinking);
-                thinking_since_ms_ = now_ms();
+                reply_watchdog_.restart(now_ms());
             }
             break;
 
         case conv::ConversationEventType::UserTranscript:
-            ESP_LOGI(kTag, "user: %s", ev.text.c_str());
             if (!ev.text.empty()) {
                 state_.set_balloon_text(ev.text, /*hold_ms=*/2500);
             }
@@ -851,7 +1003,6 @@ private:
             if (!ev.text.empty()) {
                 assistant_text_ = ev.text;
             }
-            ESP_LOGI(kTag, "assistant: %s", assistant_text_.c_str());
             if (!assistant_text_.empty()) {
                 state_.set_balloon_text(assistant_text_, /*hold_ms=*/0);
             }
@@ -907,7 +1058,7 @@ private:
             // submit the tool result — stay in Thinking and wait for it.
             if (tool_pending_) {
                 tool_pending_ = false;
-                thinking_since_ms_ = now_ms();
+                reply_watchdog_.restart(now_ms());
             } else if (local_ == Local::Thinking && assistant_pcm_.empty()) {
                 // Text-only or empty turn: nothing will switch us to Speaking.
                 enter_listening();
@@ -922,11 +1073,11 @@ private:
             const bool transport_error = ev.error == conv::ConversationError::NotConnected ||
                                          ev.error == conv::ConversationError::TransportInit;
             if (transport_error) {
-                ESP_LOGE(kTag, "transport error: %s — reconnecting", ev.text.c_str());
+                ESP_LOGE(kTag, "transport error — reconnecting");
                 state_.set_balloon_text("接続エラー", /*hold_ms=*/3000);
                 recover_after_error();
             } else {
-                ESP_LOGW(kTag, "server error (non-fatal): %s", ev.text.c_str());
+                ESP_LOGW(kTag, "server error (non-fatal)");
             }
             break;
         }
@@ -937,9 +1088,21 @@ private:
 
     void dispatch_tool(const conv::ToolCall& call)
     {
-        ESP_LOGI(kTag, "tool call: %s args=%s", call.name.c_str(), call.arguments_json.c_str());
+        ESP_LOGI(kTag, "tool call: %s", call.name.c_str());
         std::string result = R"({"ok":false,"error":"unknown tool"})";
 
+#if CONFIG_STACKCHAN_CONVERSATION_DANCE
+        if (call.name == "start_dance_mode") {
+            if (!dance::valid_session_arguments(call.arguments_json)) {
+                result = R"({"ok":false,"error":"expected empty object"})";
+            } else if (!article03::request_session() && !article03::session_requested()) {
+                result = dance::Session{}.summary(dance::SessionExit::Error);
+            } else {
+                dance_session(&call);
+                return;
+            }
+        } else
+#endif
         if (call.name == "set_expression") {
             result = handle_set_expression(call.arguments_json);
         } else if (call.name == "set_head_pose") {
@@ -952,9 +1115,12 @@ private:
         // result; mark it pending so ResponseDone for the tool-call response
         // doesn't drop us back to Listening prematurely.
         tool_pending_ = true;
-        auto r = client_->submit_tool_result(call.call_id, result);
+        set_local(Local::Thinking);
+        reply_watchdog_.restart(now_ms());
+        auto r = client_->submit_tool_result(call, result);
         if (!r) {
             ESP_LOGE(kTag, "submit_tool_result failed: %d", static_cast<int>(r.error()));
+            recover_after_error();
         }
     }
 
@@ -1128,6 +1294,7 @@ private:
     conv::ConversationConfig config_{};
     std::unique_ptr<conv::ConversationService> client_;
     QueueHandle_t event_queue_{nullptr};
+    std::atomic<bool> queue_fault_{false};
 
     // Per-provider audio rates set in the constructor.
     std::uint32_t mic_sample_rate_{8000};
@@ -1136,7 +1303,7 @@ private:
     std::size_t jitter_buffer_samples_{2400};
 
     Local local_{Local::Init};
-    std::uint32_t thinking_since_ms_{0};
+    conv::ReplyWatchdog reply_watchdog_;
     bool tool_pending_{false};
 
     std::array<std::vector<std::int16_t>, 2> mic_buf_{};

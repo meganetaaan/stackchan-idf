@@ -363,8 +363,7 @@ void wifi_enable_ap_mode()
     }
 
     g_ap_active.store(true, std::memory_order_release);
-    ESP_LOGI(kTag, "AP up: SSID=\"%s\" PW=\"%s\" IP=%s",
-             g_ap_ssid, g_ap_pw, g_ap_ip);
+    ESP_LOGI(kTag, "AP up: IP=%s", g_ap_ip);
 
     // Hand off the rest (HTTP server / mDNS / captive portal) to a worker
     // task. demo_loop returns immediately so the next render-task tick

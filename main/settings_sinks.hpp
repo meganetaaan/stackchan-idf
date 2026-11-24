@@ -29,6 +29,9 @@ void attach_state(SharedState& state);
 
 // kana (ひらがな) を発話タスクで喋る。ASR ウェイクワードの返事等から使う。
 void say_kana(std::string_view kana_utf8);
+#if CONFIG_STACKCHAN_CONVERSATION_DANCE
+bool play_requested_speech();
+#endif
 
 // Per-board factory speaker volume — the "100 %" reference the user gain
 // multiplies (see apply_speaker_volume). Set from boot before the first
@@ -45,6 +48,7 @@ void set_say_options(const stackchan::jtts::Options& opts);
 // the caller handles persistence. One-touch mute overrides the percent to 0
 // while SharedState::speaker_muted is set.
 void apply_speaker_volume(std::uint16_t pct) noexcept;
+void refresh_speaker_volume() noexcept;
 
 // apply_speaker_volume + persist via config_store::save_speaker_volume.
 // This is the sink both settings transports and demo_loop's volume watcher

@@ -78,12 +78,11 @@ public:
         }
         config_ = config;
 
-        // The URL includes the API key as ?key=... — esp_websocket_client
-        // hands it through to the transport unchanged.
-        const std::string uri = std::string{"wss://"} + kHost + kPath + "?key=" + api_key_;
-
+        const std::string uri = std::string{"wss://"} + kHost + kPath;
+        const std::string headers = "x-goog-api-key: " + api_key_ + "\r\n";
         esp_websocket_client_config_t cfg{};
         cfg.uri = uri.c_str();
+        cfg.headers = headers.c_str();
         cfg.crt_bundle_attach = esp_crt_bundle_attach;
         cfg.buffer_size = 8192;
         cfg.task_stack = 6144;
@@ -213,7 +212,7 @@ public:
     }
 
     tl::expected<void, ConversationError> submit_tool_result(std::string_view call_id,
-                                                              std::string_view output_json)
+                                                              std::string_view output_json, std::string_view name = {})
     {
         std::lock_guard lock{send_mutex_};
         if (client_ == nullptr || !esp_websocket_client_is_connected(client_)) {
@@ -224,16 +223,12 @@ public:
         //   { "toolResponse":
         //     { "functionResponses":
         //       [ { "id": <id>, "name": <name>, "response": <object> } ] } }
-        // We don't have the function name here — the caller usually returns
-        // the result with the call_id alone, so leave name empty and let the
-        // server look up by id. Parse output_json into a cJSON object; if it
-        // isn't valid JSON, wrap it as {"output": "<string>"} so the server
-        // still gets something coherent.
         cJSON* root = cJSON_CreateObject();
         cJSON* tr = cJSON_AddObjectToObject(root, "toolResponse");
         cJSON* arr = cJSON_AddArrayToObject(tr, "functionResponses");
         cJSON* item = cJSON_CreateObject();
         cJSON_AddStringToObject(item, "id", std::string{call_id}.c_str());
+        if (!name.empty()) cJSON_AddStringToObject(item, "name", std::string{name}.c_str());
 
         cJSON* parsed = cJSON_Parse(std::string{output_json}.c_str());
         if (parsed != nullptr && cJSON_IsObject(parsed)) {
@@ -394,9 +389,9 @@ private:
             // shows the actual cause; the conv-task recovery path takes over
             // from here. setup_sent_ disambiguates the two phases in the log.
             if (last_close_code_ != 0) {
-                ESP_LOGW(kTag, "WEBSOCKET_EVENT_CLOSED phase=%s code=%u reason='%s'",
+                ESP_LOGW(kTag, "WEBSOCKET_EVENT_CLOSED phase=%s code=%u",
                          setup_sent_ ? "post-setup" : "pre-setup",
-                         last_close_code_, last_close_reason_.c_str());
+                         last_close_code_);
             } else {
                 ESP_LOGW(kTag, "WEBSOCKET_EVENT_CLOSED phase=%s (no close frame seen)",
                          setup_sent_ ? "post-setup" : "pre-setup");
@@ -406,7 +401,6 @@ private:
             // Reset for the next session — the new client (re-init in
             // conv-task) will see fresh frames.
             last_close_code_ = 0;
-            last_close_reason_.clear();
             break;
         default:
             break;
@@ -428,13 +422,8 @@ private:
             if (rx_op_code_ == 0x08 && data->data_len >= 2) {
                 const auto* bytes = reinterpret_cast<const std::uint8_t*>(data->data_ptr);
                 const std::uint16_t code = (bytes[0] << 8) | bytes[1];
-                const int reason_len = data->data_len - 2;
-                const char* reason = reinterpret_cast<const char*>(bytes + 2);
-                ESP_LOGW(kTag, "ws close: code=%u reason='%.*s'", code, reason_len, reason);
-                // Stash for the WEBSOCKET_EVENT_CLOSED handler (fires after
-                // this) so it can log the actual code/reason.
+                ESP_LOGW(kTag, "ws close: code=%u", code);
                 last_close_code_ = code;
-                last_close_reason_.assign(reason, reason_len);
 
                 // Gemini returns code=1008 (RFC 6455 "Policy Violation") for
                 // a few different reasons. The two we've observed in the
@@ -462,8 +451,7 @@ private:
                 // also keeps the handle across 1011 and just retries with
                 // backoff.
                 if (code == 1008 && !session_handle_.empty()) {
-                    ESP_LOGW(kTag, "1008 reason='%.*s' → discarding resumption handle (%u bytes)",
-                             reason_len, reason,
+                    ESP_LOGW(kTag, "1008 → discarding resumption handle (%u bytes)",
                              static_cast<unsigned>(session_handle_.size()));
                     session_handle_.clear();
                 }
@@ -591,20 +579,6 @@ private:
 
     void parse_server_event(const char* json, std::size_t len)
     {
-        // Temporary diagnostic for the first few messages so we can see what
-        // the server is actually sending during setup negotiation.
-        // One-shot peek at the first few non-audio frames so we can spot
-        // unexpected setup rejections / new event shapes in the logs.
-        // Audio (inlineData) is skipped — it's multi-KB base64 that dwarfs
-        // everything else and is already captured by the per-100-chunk
-        // audio_send heartbeat.
-        if (rx_log_count_ < 5 && std::strstr(json, "\"inlineData\"") == nullptr) {
-            const std::size_t snip = std::min<std::size_t>(len, 384);
-            ESP_LOGI(kTag, "rx[%u/%uB]: %.*s%s",
-                     rx_log_count_, static_cast<unsigned>(len),
-                     static_cast<int>(snip), json, snip < len ? "…" : "");
-            ++rx_log_count_;
-        }
         cJSON* root = cJSON_ParseWithLength(json, len);
         if (root == nullptr) {
             ESP_LOGW(kTag, "json parse failed");
@@ -966,7 +940,6 @@ private:
     bool setup_sent_{false};
     bool turn_speech_stopped_emitted_{false};
     std::uint32_t audio_seq_{0};
-    unsigned rx_log_count_{0};
     // Per-turn rolling stats for base64 decode + memcpy in handle_serverContent.
     // Logged + reset on turnComplete so the line shows up alongside the conv-task
     // playback metrics for the same turn (correlatable by timestamp).
@@ -1009,7 +982,6 @@ private:
     // — previously CLOSED logged a misleading "(setup rejected?)" hint that
     // was wrong for any post-setup close.
     std::uint16_t last_close_code_{0};
-    std::string last_close_reason_;
 
     char* rx_buffer_{nullptr};
     std::size_t rx_capacity_{0};
@@ -1066,6 +1038,12 @@ tl::expected<void, ConversationError>
 GeminiLiveClient::submit_tool_result(std::string_view call_id, std::string_view output_json)
 {
     return impl_->submit_tool_result(call_id, output_json);
+}
+
+tl::expected<void, ConversationError>
+GeminiLiveClient::submit_tool_result(const ToolCall& call, std::string_view output_json, bool /*continue_reply*/)
+{
+    return impl_->submit_tool_result(call.call_id, output_json, call.name);
 }
 
 tl::expected<void, ConversationError> GeminiLiveClient::cancel_response()

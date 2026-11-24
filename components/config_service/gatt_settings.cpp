@@ -442,6 +442,12 @@ static uint16_t g_ota_ctrl_handle = 0;
 static uint16_t g_ota_data_handle = 0;
 static uint16_t g_provider_handle = 0;
 static uint16_t g_gemini_key_handle = 0;
+#if CONFIG_STACKCHAN_CONVERSATION_ENABLED
+static const ble_uuid128_t kSystemPromptUuid = BLE_UUID128_INIT(
+    0x00, 0x1f, 0x4b, 0x8d, 0x5a, 0x2c, 0x6f, 0x9e,
+    0x2a, 0x4d, 0x1c, 0x7b, 0x30, 0xa0, 0xf0, 0xe3);
+static uint16_t g_system_prompt_handle = 0;
+#endif
 static uint16_t g_xiaozhi_url_handle = 0;
 static uint16_t g_xiaozhi_token_handle = 0;
 static uint16_t g_face_config_handle = 0;
@@ -1339,6 +1345,15 @@ static int gatt_access_cb(uint16_t /*conn_handle*/, uint16_t attr_handle,
             xSemaphoreGive(g_mutex);
             return 0;
         }
+#if CONFIG_STACKCHAN_CONVERSATION_ENABLED
+        if (attr_handle == g_system_prompt_handle) {
+            if (pt.size() > 484) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+            xSemaphoreTake(g_mutex, portMAX_DELAY);
+            g_staging.set_str("system-prompt", std::string(pt.begin(), pt.end()));
+            xSemaphoreGive(g_mutex);
+            return 0;
+        }
+#endif
         if (attr_handle == g_xiaozhi_url_handle) {
             if (pt.size() > 256) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
             std::string val(reinterpret_cast<const char*>(pt.data()), pt.size());
@@ -1875,6 +1890,14 @@ static ble_gatt_chr_def kChrs[] = {
         .flags = BLE_GATT_CHR_F_WRITE,
         .val_handle = &g_gemini_key_handle,
     },
+#if CONFIG_STACKCHAN_CONVERSATION_ENABLED
+    {
+        .uuid = &kSystemPromptUuid.u,
+        .access_cb = gatt_access_cb,
+        .flags = BLE_GATT_CHR_F_WRITE,
+        .val_handle = &g_system_prompt_handle,
+    },
+#endif
     {
         .uuid = &kXiaozhiUrlUuid.u,
         .access_cb = gatt_access_cb,

@@ -924,6 +924,12 @@
       <label for="gemini-apikey">Gemini API キー</label>
       <input type="password" id="gemini-apikey" maxlength="256" placeholder="AIza… （変更しない場合は空欄）">
 
+      <div id="prompt-settings" hidden>
+        <label for="system-prompt">システムプロンプト</label>
+        <textarea id="system-prompt" placeholder="変更する場合に入力。UTF-8で484バイトまで"></textarea>
+        <label><input type="checkbox" id="reset-prompt">既定のプロンプトに戻す</label>
+      </div>
+
       <label for="xiaozhi-url">XiaoZhi サーバー URL</label>
       <input type="text" id="xiaozhi-url" maxlength="256" placeholder="ws://192.168.1.10:8000/xiaozhi/v1/ （変更しない場合は空欄）">
 
@@ -1260,6 +1266,7 @@ const CHR_OTA_CTRL = 'e3f0a009-7b1c-4d2a-9e6f-2c5a8d4b1f00';
 const CHR_OTA_DATA = 'e3f0a00a-7b1c-4d2a-9e6f-2c5a8d4b1f00';
 const CHR_PROVIDER = 'e3f0a00b-7b1c-4d2a-9e6f-2c5a8d4b1f00';
 const CHR_GEMINI_KEY = 'e3f0a00c-7b1c-4d2a-9e6f-2c5a8d4b1f00';
+const CHR_SYSTEM_PROMPT = 'e3f0a030-7b1c-4d2a-9e6f-2c5a8d4b1f00';
 const CHR_XIAOZHI_URL = 'e3f0a013-7b1c-4d2a-9e6f-2c5a8d4b1f00';
 const CHR_XIAOZHI_TOKEN = 'e3f0a014-7b1c-4d2a-9e6f-2c5a8d4b1f00';
 // FaceConfig — encrypted compact JSON of the avatar face tuning. WRITE applies
@@ -1300,7 +1307,7 @@ const DIS_CHRS = {
 
 // --- State ---
 let bleDevice = null, bleServer = null, svc = null;
-let chrSsid = null, chrPass = null, chrKey = null, chrApply = null, chrStatus = null, chrKx = null, chrEn = null, chrRtpEn = null, chrJttsIdleEn = null, chrJtts = null, chrOtaCtrl = null, chrOtaData = null, chrProvider = null, chrGeminiKey = null, chrXiaozhiUrl = null, chrXiaozhiToken = null, chrFaceConfig = null, chrBattery = null, chrBatGauge = null, chrStartupArp = null, chrServoEnabled = null, chrMcpToken = null, chrLtConfig = null, chrServoLimits = null, chrServoRangeMode = null, chrServoPositions = null, chrBoardKind = null, chrWifiIp = null, chrWifiMac = null, chrAudioCtrl = null, chrAudioData = null, chrAudioCredit = null, chrAudioMetrics = null, chrLedState = null, chrMicLipGain = null, chrLedMouthSync = null, chrLipSyncMode = null, chrMicLipAgc = null, chrSpeakerVolume = null, chrJttsSay = null, chrSanoTts = null, chrOperationMode = null, chrAudioOutput = null, chrBargeIn = null, chrDeviceName = null, chrAuthPassword = null, chrAvatarBc = null;
+let chrSsid = null, chrPass = null, chrKey = null, chrApply = null, chrStatus = null, chrKx = null, chrEn = null, chrRtpEn = null, chrJttsIdleEn = null, chrJtts = null, chrOtaCtrl = null, chrOtaData = null, chrProvider = null, chrGeminiKey = null, chrSystemPrompt = null, chrXiaozhiUrl = null, chrXiaozhiToken = null, chrFaceConfig = null, chrBattery = null, chrBatGauge = null, chrStartupArp = null, chrServoEnabled = null, chrMcpToken = null, chrLtConfig = null, chrServoLimits = null, chrServoRangeMode = null, chrServoPositions = null, chrBoardKind = null, chrWifiIp = null, chrWifiMac = null, chrAudioCtrl = null, chrAudioData = null, chrAudioCredit = null, chrAudioMetrics = null, chrLedState = null, chrMicLipGain = null, chrLedMouthSync = null, chrLipSyncMode = null, chrMicLipAgc = null, chrSpeakerVolume = null, chrJttsSay = null, chrSanoTts = null, chrOperationMode = null, chrAudioOutput = null, chrBargeIn = null, chrDeviceName = null, chrAuthPassword = null, chrAvatarBc = null;
 let boardKind = null; // null = unknown (older firmware), else 0/1/2 from BOARD_*
 let batteryPollTimer = null;  // setInterval handle while connected
 let jttsInitialJson = '';  // last read JSON, used to detect Apply-time changes
@@ -1849,6 +1856,7 @@ function applyCapabilityGating() {
       el.style.display = visible ? '' : 'none';
     }
   };
+  document.getElementById('prompt-settings').hidden = !chrSystemPrompt;
   setVisible('label[for="provider"], #provider', hasGemini);
   setVisible('#provider + p.hint', hasGemini);
   setVisible('label[for="gemini-apikey"], #gemini-apikey', hasGemini);
@@ -2665,6 +2673,7 @@ document.getElementById('btn-connect').addEventListener('click', async () => {
       ['otaData',    CHR_OTA_DATA],
       ['provider',   CHR_PROVIDER],
       ['geminiKey',  CHR_GEMINI_KEY],
+      ['systemPrompt', CHR_SYSTEM_PROMPT],
       ['xiaozhiUrl', CHR_XIAOZHI_URL],
       ['xiaozhiToken', CHR_XIAOZHI_TOKEN],
       ['faceConfig', CHR_FACE_CONFIG],
@@ -2722,6 +2731,7 @@ document.getElementById('btn-connect').addEventListener('click', async () => {
     chrOtaData  = found.otaData  ?? null;
     chrProvider = found.provider ?? null;
     chrGeminiKey= found.geminiKey?? null;
+    chrSystemPrompt = found.systemPrompt ?? null;
     chrXiaozhiUrl = found.xiaozhiUrl ?? null;
     chrXiaozhiToken = found.xiaozhiToken ?? null;
     chrFaceConfig = found.faceConfig ?? null;
@@ -3122,7 +3132,7 @@ function onDisconnected() {
   ledStateLoaded = false;
   clearTimeout(micLipWriteTimer); micLipWriteTimer = null;
   micLipLoaded = false;
-  chrSsid = chrPass = chrKey = chrApply = chrStatus = chrKx = chrEn = chrRtpEn = chrJttsIdleEn = chrJtts = chrOtaCtrl = chrOtaData = chrProvider = chrGeminiKey = chrXiaozhiUrl = chrXiaozhiToken = chrFaceConfig = chrBattery = chrBatGauge = chrServoEnabled = chrMcpToken = chrLtConfig = chrServoLimits = chrServoRangeMode = chrServoPositions = chrBoardKind = chrWifiIp = chrWifiMac = chrAudioCtrl = chrAudioData = chrAudioCredit = chrAudioMetrics = chrLedState = chrMicLipGain = chrLedMouthSync = chrLipSyncMode = chrMicLipAgc = chrSpeakerVolume = chrJttsSay = chrOperationMode = chrAudioOutput = chrBargeIn = chrAvatarBc = null;
+  chrSsid = chrPass = chrKey = chrApply = chrStatus = chrKx = chrEn = chrRtpEn = chrJttsIdleEn = chrJtts = chrOtaCtrl = chrOtaData = chrProvider = chrGeminiKey = chrSystemPrompt = chrXiaozhiUrl = chrXiaozhiToken = chrFaceConfig = chrBattery = chrBatGauge = chrServoEnabled = chrMcpToken = chrLtConfig = chrServoLimits = chrServoRangeMode = chrServoPositions = chrBoardKind = chrWifiIp = chrWifiMac = chrAudioCtrl = chrAudioData = chrAudioCredit = chrAudioMetrics = chrLedState = chrMicLipGain = chrLedMouthSync = chrLipSyncMode = chrMicLipAgc = chrSpeakerVolume = chrJttsSay = chrOperationMode = chrAudioOutput = chrBargeIn = chrAvatarBc = null;
   if (typeof refreshAvbcButton === 'function') refreshAvbcButton();
   boardKind = null;
   aesKey = null;
@@ -3140,6 +3150,8 @@ function onDisconnected() {
   delete document.getElementById('startup-arpeggio-enabled').dataset.initial;
   delete document.getElementById('servo-enabled').dataset.initial;
   delete document.getElementById('provider').dataset.initial;
+  document.getElementById('reset-prompt').checked = false;
+  document.getElementById('system-prompt').value = '';
   jttsInitialJson = '';
   servoLimitsInitial = '';
   writeJttsForm('');
@@ -3181,6 +3193,13 @@ document.getElementById('btn-apply').addEventListener('click', async () => {
   try {
     // Write only fields that have input (empty = unchanged). All payloads
     // travel through the AES-GCM session established at connect.
+    const prompt = document.getElementById('system-prompt');
+    const reset = document.getElementById('reset-prompt');
+    if (chrSystemPrompt && (prompt.value || reset.checked)) {
+      const bytes = strToBytes(reset.checked ? '' : prompt.value);
+      if (bytes.length > 484) throw new Error('BLEのプロンプトはUTF-8で484バイトまでです。長文はWi-Fi設定画面で保存できます。');
+      await writeEncrypted(chrSystemPrompt, bytes);
+    }
     if (ssid && chrSsid) {
       await writeEncrypted(chrSsid, strToBytes(ssid));
       log('SSID 書き込み完了', 'ok');

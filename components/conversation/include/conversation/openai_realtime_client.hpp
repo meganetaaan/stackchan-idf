@@ -30,6 +30,9 @@ public:
     tl::expected<void, ConversationError> commit_audio() override;
     tl::expected<void, ConversationError> submit_tool_result(std::string_view call_id,
                                                              std::string_view output_json) override;
+    tl::expected<void, ConversationError> submit_tool_result(const ToolCall& call,
+                                                             std::string_view output_json,
+                                                             bool continue_reply = true) override;
     tl::expected<void, ConversationError> cancel_response() override;
     ConversationState state() const override;
     std::uint32_t tx_evicted_chunks() const override;

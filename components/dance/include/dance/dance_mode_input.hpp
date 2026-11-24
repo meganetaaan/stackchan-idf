@@ -17,11 +17,18 @@ public:
     std::uint32_t revision() const noexcept { return revision_; }
     bool reads_head() const noexcept
     {
-        return state_ == State::Standby || state_ == State::Listening;
+        return state_ == State::Standby || state_ == State::Listening || (interruptible_ && state_ == State::Dancing);
     }
     void enable() noexcept { reset_input(); state_ = State::Standby; }
     void disable() noexcept { reset_input(); state_ = State::Disabled; }
 
+    void enable_session_mode() noexcept { interruptible_ = true; enable(); }
+    bool request_session() noexcept {
+        if (state_ != State::Standby) return false;
+        state_ = State::Entering;
+        reset_input();
+        return true;
+    }
     void observe(std::optional<Reading> reading, std::uint32_t now_ms) noexcept;
     bool claps_allowed(std::uint32_t now_ms) const noexcept;
     bool start_dance(std::uint32_t now_ms) noexcept;
@@ -38,6 +45,7 @@ private:
     }
     State state_{State::Disabled};
     HeadStrokeDetector detector_;
+    bool interruptible_{false};
     bool quiet_{false};
     std::uint32_t revision_{0};
     std::uint32_t quiet_since_ms_{0};

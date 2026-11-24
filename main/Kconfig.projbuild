@@ -46,6 +46,15 @@ menu "Stack-chan feature gates"
             _task at boot. Disable to drop ~80 KB of code + the PSRAM-only
             assistant_pcm ring, suitable for boards with no PSRAM.
 
+    config STACKCHAN_CONVERSATION_DANCE
+        bool "Enable clap-dance sessions during conversation"
+        depends on STACKCHAN_CONVERSATION_ENABLED && !STACKCHAN_AUDIO_STREAM_ENABLED && !STACKCHAN_WIFI_AUDIO_ENABLED
+        depends on !STACKCHAN_ASR_ENABLED && !STACKCHAN_DANCE_POC
+        default n
+        help
+            Adds the start_dance_mode tool and local head-stroke control on CoreS3.
+            Leave disabled for standalone conversation.
+
     config STACKCHAN_AUDIO_STREAM_ENABLED
         bool "Enable BLE audio streaming sink"
         default y

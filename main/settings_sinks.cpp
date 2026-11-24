@@ -9,7 +9,10 @@
 #include "sano_weights.hpp"
 
 #include <cstdio>
+#include <deque>
+#include "dance/dance.hpp"
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -180,6 +183,45 @@ std::uint16_t read_speaker_volume_pct()
     return g_state->speaker.volume_pct.load(std::memory_order_relaxed);
 }
 
+#if CONFIG_STACKCHAN_CONVERSATION_DANCE
+std::mutex say_mutex;
+std::deque<std::string> pending_say;
+#endif
+
+void play_settings_speech(std::string_view kana_text)
+{
+    std::u32string kana = stackchan::app::decode_utf8(kana_text);
+    if (kana.empty()) {
+        ESP_LOGW(kTag, "say: empty / invalid utf8");
+        return;
+    }
+    // Use the user's jtts settings (voice / pitch / mora /
+    // formant / vibrato) cached at boot. Falls back to the
+    // default-options preset when no JSON has been saved yet
+    // (g_say_opts_ready stays false until app_main sets it).
+    stackchan::jtts::Options opt = g_say_opts_ready
+        ? g_say_opts
+        : stackchan::app::resolve_speech_options("", stackchan::app::Speech::kSampleRate);
+    // synthesize_ex は実際の出力レートを返す (sanoTTS は 22.05 kHz、他は
+    // opt.sample_rate_hz)。BLE / HTTP の jtts-say もこれで sanoTTS を通る。
+    std::uint32_t rate = opt.sample_rate_hz;
+    std::vector<std::int16_t> pcm;
+    if (auto r = stackchan::jtts::synthesize_ex(kana, pcm, opt); !r) {
+        ESP_LOGW(kTag, "say synth fail: %s",
+                 stackchan::jtts::to_string(r.error()));
+        return;
+    } else {
+        rate = *r;
+    }
+    if (pcm.empty()) {
+        return;
+    }
+    while (M5.Speaker.isPlaying()) vTaskDelay(pdMS_TO_TICKS(20));
+    M5.Speaker.playRaw(pcm.data(), pcm.size(), rate, /*stereo=*/false);
+    while (M5.Speaker.isPlaying()) vTaskDelay(pdMS_TO_TICKS(20));
+    stackchan::wifi_config::mcp_events::publish_say_done();
+}
+
 // Spawn a PSRAM-stack worker that synthesises `kana_utf8` via jtts and
 // pushes it through M5.Speaker.playRaw. Shared by /mcp/say (external MCP
 // gate) and the settings-page test-speak buttons (BLE chr + /api/jtts-say,
@@ -187,6 +229,13 @@ std::uint16_t read_speaker_volume_pct()
 // either by the worker or on task-create failure here.
 void start_say_worker(std::string_view kana_utf8)
 {
+#if CONFIG_STACKCHAN_CONVERSATION_DANCE
+    if (g_state && g_state->conversation_dance_enabled) {
+        std::lock_guard lock{say_mutex};
+        pending_say.emplace_back(kana_utf8);
+        return;
+    }
+#endif
     auto* owned = new std::string{kana_utf8};
     // 12 KiB stack in PSRAM. See the long rationale on the original
     // /mcp/say wiring (steady-state internal-RAM largest is ~10 KiB after
@@ -201,36 +250,7 @@ void start_say_worker(std::string_view kana_utf8)
             // before it — otherwise each /api/say leaks the whole buffer.
             [&] {
             std::unique_ptr<std::string> kana_text{static_cast<std::string*>(arg)};
-            std::u32string kana = stackchan::app::decode_utf8(*kana_text);
-            if (kana.empty()) {
-                ESP_LOGW(kTag, "say: empty / invalid utf8");
-                return;
-            }
-            // Use the user's jtts settings (voice / pitch / mora /
-            // formant / vibrato) cached at boot. Falls back to the
-            // default-options preset when no JSON has been saved yet
-            // (g_say_opts_ready stays false until app_main sets it).
-            stackchan::jtts::Options opt = g_say_opts_ready
-                ? g_say_opts
-                : stackchan::app::resolve_speech_options("", stackchan::app::Speech::kSampleRate);
-            // synthesize_ex は実際の出力レートを返す (sanoTTS は 22.05 kHz、他は
-            // opt.sample_rate_hz)。BLE / HTTP の jtts-say もこれで sanoTTS を通る。
-            std::uint32_t rate = opt.sample_rate_hz;
-            std::vector<std::int16_t> pcm;
-            if (auto r = stackchan::jtts::synthesize_ex(kana, pcm, opt); !r) {
-                ESP_LOGW(kTag, "say synth fail: %s",
-                         stackchan::jtts::to_string(r.error()));
-                return;
-            } else {
-                rate = *r;
-            }
-            if (pcm.empty()) {
-                return;
-            }
-            while (M5.Speaker.isPlaying()) vTaskDelay(pdMS_TO_TICKS(20));
-            M5.Speaker.playRaw(pcm.data(), pcm.size(), rate, /*stereo=*/false);
-            while (M5.Speaker.isPlaying()) vTaskDelay(pdMS_TO_TICKS(20));
-            stackchan::wifi_config::mcp_events::publish_say_done();
+            play_settings_speech(*kana_text);
             }();
             vTaskDeleteWithCaps(nullptr);
         },
@@ -307,6 +327,26 @@ bool apply_avatar_bytecode(const std::uint8_t* data, std::size_t len)
 
 } // namespace
 
+#if CONFIG_STACKCHAN_CONVERSATION_DANCE
+bool play_requested_speech()
+{
+    std::string kana;
+    {
+        std::lock_guard lock{say_mutex};
+        if (pending_say.empty()) return false;
+        kana = std::move(pending_say.front());
+        pending_say.pop_front();
+    }
+    if (kana.empty()) return false;
+    M5.Mic.end();
+    vTaskDelay(pdMS_TO_TICKS(20));
+    play_settings_speech(kana);
+    M5.Speaker.end();
+    vTaskDelay(pdMS_TO_TICKS(20));
+    return true;
+}
+#endif
+
 void say_kana(std::string_view kana_utf8)
 {
     start_say_worker(kana_utf8);
@@ -358,20 +398,27 @@ void set_say_options(const stackchan::jtts::Options& opts)
     g_say_opts_ready = true;
 }
 
+void refresh_speaker_volume() noexcept
+{
+    if (!g_state) return;
+    const auto pct = g_state->speaker.volume_pct.load();
+    auto volume = std::min<unsigned>(255, g_speaker_base_volume * pct / 100u);
+#if CONFIG_STACKCHAN_CONVERSATION_DANCE
+    if (g_state->conversation_dance_enabled && g_state->servo.dance_active.load()) {
+        volume = std::min<unsigned>(volume, dance::kToneVolume);
+    }
+#endif
+    M5.Speaker.setVolume(g_state->speaker.muted.load() ? 0 : volume);
+}
+
 void apply_speaker_volume(std::uint16_t pct) noexcept
 {
-    if (pct > 200) pct = 200;
-    int v = static_cast<int>(g_speaker_base_volume) * static_cast<int>(pct) / 100;
-    if (v > 255) v = 255;
-    if (v < 0) v = 0;
-    // One-touch mute overrides the percent: master volume goes to 0 while
-    // the flag is set, and the user's pct survives untouched for unmute.
-    if (g_state != nullptr && g_state->speaker.muted.load(std::memory_order_relaxed)) {
-        v = 0;
-    }
-    M5.Speaker.setVolume(static_cast<std::uint8_t>(v));
-    if (g_state != nullptr) {
-        g_state->speaker.volume_pct.store(pct, std::memory_order_relaxed);
+    pct = std::min<std::uint16_t>(pct, 200);
+    if (g_state) {
+        g_state->speaker.volume_pct.store(pct);
+        refresh_speaker_volume();
+    } else {
+        M5.Speaker.setVolume(std::min<unsigned>(255, g_speaker_base_volume * pct / 100u));
     }
 }
 

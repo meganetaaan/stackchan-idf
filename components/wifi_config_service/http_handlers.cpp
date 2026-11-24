@@ -502,7 +502,7 @@ esp_err_t handle_status_get(httpd_req_t* req)
     body += "\"servo_limits\":\"" + escape_json(cfg.servo_limits_json) + "\",";
     body += "\"lt_config\":\"" + escape_json(cfg.lt_config_json) + "\",";
     body += "\"system_prompt\":\"" + escape_json(cfg.system_prompt) + "\",";
-    body += "\"conv_extra_headers\":\"" + escape_json(cfg.conv_extra_headers) + "\",";
+    body += "\"has_conv_extra_headers\":" + std::string(cfg.conv_extra_headers.empty() ? "false" : "true") + ",";
     body += "\"battery_mv\":" + std::to_string(bat_mv) + ",";
     body += "\"battery_ma\":" + std::to_string(bat_ma) + ",";
     body += "\"battery_pct\":" + std::to_string(bat_pct) + ",";

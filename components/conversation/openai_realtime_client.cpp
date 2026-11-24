@@ -260,7 +260,8 @@ public:
         return {};
     }
 
-    tl::expected<void, ConversationError> submit_tool_result(std::string_view call_id, std::string_view output_json)
+    tl::expected<void, ConversationError> submit_tool_result(std::string_view call_id, std::string_view output_json,
+                                                              bool continue_reply = true)
     {
         std::lock_guard lock{send_mutex_};
         if (client_ == nullptr || !esp_websocket_client_is_connected(client_)) {
@@ -278,6 +279,8 @@ public:
         if (!item_ok) {
             return tl::unexpected{ConversationError::SendFailed};
         }
+
+        if (!continue_reply) return {};
 
         // Server VAD does not auto-continue after a tool result — ask for it.
         cJSON* resp = cJSON_CreateObject();
@@ -532,7 +535,8 @@ private:
             break;
         case WEBSOCKET_EVENT_CLOSED:
             ESP_LOGW(kTag, "WEBSOCKET_EVENT_CLOSED");
-            set_state(ConversationState::Idle);
+            set_state(ConversationState::Error);
+            emit_error(ConversationError::NotConnected, "websocket closed");
             break;
         default:
             break;
@@ -761,7 +765,7 @@ private:
         } else if (std::strcmp(type, "error") == 0) {
             const cJSON* err = cJSON_GetObjectItemCaseSensitive(root, "error");
             const char* msg = err != nullptr ? json_str(err, "message") : nullptr;
-            ESP_LOGE(kTag, "server error: %s", msg != nullptr ? msg : "(unknown)");
+            ESP_LOGE(kTag, "server error");
             emit_error(ConversationError::ServerError, msg != nullptr ? msg : "server error");
         } else {
             ESP_LOGD(kTag, "unhandled event: %s", type);
@@ -852,7 +856,7 @@ private:
     bool session_updated_{false};
     // TEMP: per-chunk sequence counter for the push_audio diagnostic log.
     std::uint32_t audio_seq_{0};
-    bool pending_tool_call_{false};
+    std::atomic<bool> pending_tool_call_{false};
     bool output_is_ulaw_{false};            // wire codec for assistant audio (g711_ulaw vs pcm16)
     std::atomic<bool> response_active_{false}; // a response is mid-generation (set/cleared from the WS task)
 
@@ -928,6 +932,12 @@ tl::expected<void, ConversationError> OpenAiRealtimeClient::submit_tool_result(s
                                                                                std::string_view output_json)
 {
     return impl_->submit_tool_result(call_id, output_json);
+}
+
+tl::expected<void, ConversationError>
+OpenAiRealtimeClient::submit_tool_result(const ToolCall& call, std::string_view output_json, bool continue_reply)
+{
+    return impl_->submit_tool_result(call.call_id, output_json, continue_reply);
 }
 
 tl::expected<void, ConversationError> OpenAiRealtimeClient::cancel_response()

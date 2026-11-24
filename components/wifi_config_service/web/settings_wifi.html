@@ -794,6 +794,7 @@
       <textarea id="conv-headers" rows="3" maxlength="1024"
                 style="width:100%;box-sizing:border-box;font-size:0.8rem;padding:0.4rem;border:1px solid #ccc;border-radius:4px;white-space:pre-wrap;font-family:monospace"
                 placeholder="CF-Access-Client-Id: xxxxx.access&#10;CF-Access-Client-Secret: yyyyy"></textarea>
+      <label><input type="checkbox" id="clear-conv-headers"> 保存済みの追加ヘッダを削除する</label>
       <p class="hint">会話 API への WebSocket 接続に付与する追加ヘッダ。1 行 1 つ「ヘッダ名: 値」。Cloudflare Access のサービストークン等に使用。全プロバイダ共通。保存後の再起動で反映されます。</p>
 
       <!-- Hidden legacy toggle — operation_mode (selectable in 接続 tab) is
@@ -1616,8 +1617,7 @@ async function refresh() {
     $('xiaozhi-url').value = s.xiaozhi_url || '';
     $('system-prompt').value = s.system_prompt || '';
     $('system-prompt').dataset.initial = s.system_prompt || '';
-    $('conv-headers').value = s.conv_extra_headers || '';
-    $('conv-headers').dataset.initial = s.conv_extra_headers || '';
+    $('conv-headers').placeholder = s.has_conv_extra_headers ? '設定済み。変更する場合に入力してください' : 'ヘッダ名: 値';
 
     setFlag('flag-ssid', !!s.ssid);
     setFlag('flag-pass', !!s.has_password);
@@ -1742,8 +1742,9 @@ async function apply() {
       await postText('/api/system-prompt', sysPrompt);                        log('システムプロンプト送信', 'ok');
     }
     const convHeaders = $('conv-headers').value;
-    if (convHeaders !== ($('conv-headers').dataset.initial ?? '')) {
-      await postText('/api/conv-headers', convHeaders);                       log('追加 HTTP ヘッダ送信', 'ok');
+    const clearHeaders = $('clear-conv-headers').checked;
+    if (convHeaders || clearHeaders) {
+      await postText('/api/conv-headers', clearHeaders ? '' : convHeaders);                       log('追加 HTTP ヘッダ送信', 'ok');
     }
 
     await postText('/api/apply', '');
